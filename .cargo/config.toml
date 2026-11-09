@@ -1,0 +1,6 @@
+[env]
+# whisper.cpp is built with CMake through the `cmake` crate, which (with the Visual
+# Studio generator) replaces CMake's Release flags and strips every `/O` option, so
+# the C++ code would be compiled unoptimized (~10x slower transcription). MSVC's
+# cl.exe also reads options from the CL environment variable, which survives that.
+CL = "/O2 /DNDEBUG"
