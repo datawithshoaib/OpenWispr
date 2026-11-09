@@ -14,15 +14,15 @@ const VAD_URL: &str = "https://huggingface.co/ggml-org/whisper-vad/resolve/main/
 const VAD_FILE: &str = "ggml-silero-v5.1.2.bin";
 
 /// The model used when none is specified: good accuracy, fast on any modern CPU.
-pub const DEFAULT_MODEL: &str = "base.en";
+pub const DEFAULT_MODEL: &str = "small.en-q5_1";
 
 /// Models known to exist in the whisper.cpp repository, with approximate download size.
 pub const KNOWN_MODELS: &[(&str, &str)] = &[
     ("tiny.en", "75 MB   fastest, lowest accuracy (English)"),
-    ("base.en", "142 MB  fast, good accuracy (English) [default]"),
+    ("base.en", "142 MB  fast, good accuracy (English)"),
     ("base.en-q5_1", "57 MB   quantized base.en, slightly less accurate"),
     ("small.en", "466 MB  slower, better accuracy (English)"),
-    ("small.en-q5_1", "181 MB  quantized small.en"),
+    ("small.en-q5_1", "181 MB  quantized small.en [default]"),
     ("tiny", "75 MB   multilingual"),
     ("base", "142 MB  multilingual"),
     ("small", "466 MB  multilingual"),

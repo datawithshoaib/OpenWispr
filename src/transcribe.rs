@@ -131,8 +131,10 @@ pub fn clean_text(raw: &str) -> String {
             },
         }
     }
-    // Collapse runaway repetition ("Music Music Music Music ...") to one word;
-    // natural speech rarely repeats a word more than three times in a row.
+    // Collapse runaway repetition. Whisper can repeat single words ("Music Music
+    // Music Music") or whole phrases ("Thank you. Thank you. Thank you.").
+    // First collapse single-word runs (> 3 identical words in a row → keep one),
+    // then detect repeated multi-word phrases.
     let words: Vec<&str> = out.split_whitespace().collect();
     let mut kept: Vec<&str> = Vec::with_capacity(words.len());
     let mut i = 0;
@@ -141,12 +143,55 @@ pub fn clean_text(raw: &str) -> String {
         kept.extend(std::iter::repeat_n(words[i], if run > 3 { 1 } else { run }));
         i += run;
     }
-    let text = kept.join(" ");
+    // Collapse repeated phrases: for each phrase length (2..=half the text),
+    // if the same phrase repeats 3+ times consecutively, keep only one copy.
+    let text = collapse_repeated_phrases(&kept).join(" ");
     // Drop leftovers that are only punctuation, e.g. "." from a bracketed clip.
     if text.chars().all(|c| !c.is_alphanumeric()) {
         return String::new();
     }
     text
+}
+
+/// Detects repeated multi-word phrases and collapses them to a single occurrence.
+/// E.g. ["Thank", "you.", "Thank", "you.", "Thank", "you."] → ["Thank", "you."]
+fn collapse_repeated_phrases<'a>(words: &[&'a str]) -> Vec<&'a str> {
+    if words.len() < 4 {
+        return words.to_vec();
+    }
+    let mut result = words.to_vec();
+    // Try phrase lengths from 2 up to half the text length.
+    for phrase_len in 2..=(result.len() / 2).min(12) {
+        let mut collapsed = Vec::with_capacity(result.len());
+        let mut i = 0;
+        while i < result.len() {
+            if i + phrase_len * 2 <= result.len() {
+                // Check how many times the phrase at position i repeats.
+                let phrase = &result[i..i + phrase_len];
+                let mut reps = 1;
+                let mut j = i + phrase_len;
+                while j + phrase_len <= result.len() {
+                    let candidate = &result[j..j + phrase_len];
+                    if phrase.iter().zip(candidate.iter()).all(|(a, b)| a.eq_ignore_ascii_case(b)) {
+                        reps += 1;
+                        j += phrase_len;
+                    } else {
+                        break;
+                    }
+                }
+                if reps >= 3 {
+                    // Keep only one copy of the repeated phrase.
+                    collapsed.extend_from_slice(phrase);
+                    i = j;
+                    continue;
+                }
+            }
+            collapsed.push(result[i]);
+            i += 1;
+        }
+        result = collapsed;
+    }
+    result
 }
 
 #[cfg(test)]
@@ -184,6 +229,23 @@ mod tests {
     fn collapses_runaway_repetition() {
         assert_eq!(clean_text("Music Music Music Music Music"), "Music");
         assert_eq!(clean_text("no no no, it is very very good"), "no no no, it is very very good");
+    }
+
+    #[test]
+    fn collapses_repeated_phrases() {
+        assert_eq!(
+            clean_text("Thank you. Thank you. Thank you. Thank you."),
+            "Thank you."
+        );
+        assert_eq!(
+            clean_text("I am fine. I am fine. I am fine."),
+            "I am fine."
+        );
+        // Two repetitions is normal speech, should keep it.
+        assert_eq!(
+            clean_text("Thank you. Thank you."),
+            "Thank you. Thank you."
+        );
     }
 
     #[test]

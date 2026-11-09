@@ -7,6 +7,8 @@ mod model;
 #[cfg(windows)]
 mod platform;
 mod transcribe;
+#[cfg(windows)]
+mod tray;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -189,17 +191,37 @@ fn dictate(opts: &Opts, args: RunArgs) -> Result<()> {
     // Warm up once so the first real dictation is as fast as the rest.
     let _ = transcriber.transcribe(&vec![0.0; 16_000]);
 
+    // Start the system tray icon.
+    let tray_tx = tray::spawn_tray();
+
     // Transcribe and insert on a worker thread so the hotkey stays responsive.
     let (work_tx, work_rx) = mpsc::channel::<Vec<f32>>();
     let use_typing = args.r#type;
     std::thread::spawn(move || {
+        // Guard against duplicate output: if the same text was just transcribed
+        // within the last few seconds, skip it. Whisper sometimes produces
+        // identical output from overlapping or repeated audio.
+        let mut last_text = String::new();
+        let mut last_time = std::time::Instant::now();
+        const DEDUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
+
         for samples in work_rx {
             let secs = samples.len() as f32 / audio::WHISPER_RATE as f32;
-            let start = Instant::now();
+            let start = std::time::Instant::now();
             match transcriber.transcribe(&samples) {
                 Ok(text) if text.is_empty() => eprintln!("  (no speech detected)"),
                 Ok(text) => {
                     eprintln!("  {secs:.1}s -> {:.2}s: {text}", start.elapsed().as_secs_f32());
+
+                    // Skip exact duplicate within the dedup window.
+                    let now = std::time::Instant::now();
+                    if text == last_text && now.duration_since(last_time) < DEDUP_WINDOW {
+                        eprintln!("  (duplicate suppressed)");
+                        continue;
+                    }
+                    last_text = text.clone();
+                    last_time = now;
+
                     // Separate consecutive dictations with a space.
                     let text = format!("{text} ");
                     let result = if use_typing { platform::type_text(&text) } else { platform::paste_text(&text) };
@@ -216,6 +238,7 @@ fn dictate(opts: &Opts, args: RunArgs) -> Result<()> {
     platform::spawn_hotkey_listener(chord.clone(), tx)?;
     let mut source = AudioSource::new(&args)?;
     let sound = !args.no_sound;
+    let tray = tray_tx.clone();
     let cue = |c| {
         if sound {
             platform::play_cue(c)
@@ -233,12 +256,14 @@ fn dictate(opts: &Opts, args: RunArgs) -> Result<()> {
             Action::Start => match source.start() {
                 Ok(()) => {
                     cue(Cue::Start);
+                    let _ = tray.send(tray::TrayCommand::StartListening);
                     eprintln!("● listening...");
                 }
                 Err(e) => eprintln!("  microphone error: {e:#}"),
             },
             Action::Stop if source.is_recording() => {
                 cue(Cue::Stop);
+                let _ = tray.send(tray::TrayCommand::StopListening);
                 let samples = source.stop();
                 if audio::is_silence(&samples) {
                     eprintln!("  (too short or silent, ignored)");
@@ -248,12 +273,14 @@ fn dictate(opts: &Opts, args: RunArgs) -> Result<()> {
             }
             Action::Cancel if source.is_recording() => {
                 source.stop();
+                let _ = tray.send(tray::TrayCommand::StopListening);
                 cue(Cue::Cancel);
                 eprintln!("  cancelled");
             }
             _ => {}
         }
     }
+    let _ = tray_tx.send(tray::TrayCommand::Quit);
     Ok(())
 }
 
