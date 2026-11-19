@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openwispr"
+version = "0.1.0"
+description = "Lightweight, local, push-to-talk dictation powered by Whisper"
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24.0",
+    "pywhispercpp>=1.5.0",
+    "sounddevice>=0.4.6",
+    "requests>=2.28.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+openwispr = "openwispr.cli:main"

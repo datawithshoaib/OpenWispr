@@ -1,19 +1,33 @@
 # OpenWispr
 
-Fast, private, push-to-talk dictation for Windows, written in Rust.
+Fast, private, push-to-talk dictation for Windows, written in Python.
 
 Hold **Ctrl + Win**, speak, and release. Your words are typed into whatever app has
 focus. Speech recognition runs entirely on your machine with a free
 [Whisper](https://github.com/ggml-org/whisper.cpp) model, so nothing is sent to the cloud.
 
 - **Fast:** about 0.25 s to transcribe a typical 3-second sentence on a 4-core laptop CPU
-- **Light:** one 3.7 MB executable; the model loads in about 0.3 s; the mic is open only while you dictate
+- **Light:** minimal memory footprint; the model loads in about 0.3 s; the mic is open only while you dictate
 - **Simple:** no account, no settings UI, no background services
+
+## Installation & Setup
+
+Using [uv](https://github.com/astral-sh/uv):
+
+```bash
+# Create and activate virtual environment
+uv venv
+.venv\Scripts\activate
+
+# Install dependencies and openwispr in editable mode
+uv pip install -e ".[dev]"
+```
 
 ## Use it
 
 ```bash
 openwispr
+# or: uv run openwispr
 ```
 
 On first run it downloads the default model (`base.en`, 142 MB) plus a tiny voice-detection
@@ -54,28 +68,10 @@ By default text is inserted by pasting (fast and reliable for long text). Your p
 clipboard text is restored afterwards, and the dictated text is kept out of Windows
 clipboard history.
 
-## Build from source
-
-Requirements: Rust (`rustup`), Visual Studio 2022+ (or Build Tools) with the C++ workload,
-CMake, and LLVM/Clang (needed to generate whisper.cpp's Rust bindings).
-
-```bash
-cargo build --release
-```
-
-The binary is `target\release\openwispr.exe`. If CMake isn't on your `PATH`, use the copy
-that ships with Visual Studio, for example
-`C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin`.
-
-`.cargo/config.toml` sets `CL=/O2`. Without it, whisper.cpp is compiled **unoptimized**
-on MSVC: the `cmake` crate strips optimization flags under the Visual Studio generator, which makes
-transcription about 10x slower. whisper.cpp is also built for the CPU you compile on
-(e.g. AVX2/AVX-512), so build on the machine you'll run it on.
-
 ## Tests
 
 ```bash
-cargo test --release
+uv run pytest -v
 ```
 
 Unit tests cover the hotkey state machine (hold, tap/hands-free, cancel, Start-menu
@@ -92,13 +88,13 @@ Add `-Type` to test typing mode. The script presses Ctrl+Win itself, so don't ty
 
 ## How it works
 
-1. A low-level keyboard hook (`src/platform.rs`) feeds key events to a small state machine
-   (`src/hotkey.rs`).
-2. While recording, `cpal` captures the default microphone; audio is mixed to mono and resampled
-   to 16 kHz (`src/audio.rs`).
+1. A low-level keyboard hook (`openwispr/platform_win.py`) feeds key events to a small state machine
+   (`openwispr/hotkey.py`).
+2. While recording, `sounddevice` captures the default microphone; audio is mixed to mono and resampled
+   to 16 kHz (`openwispr/audio.py`).
 3. On release, the Silero voice-activity detector checks the clip contains speech. Whisper then
    transcribes it with greedy decoding, and the encoder window is shrunk to fit the clip
-   (`src/transcribe.rs`). That last step is what makes short dictations 5–8x faster than stock Whisper.
+   (`openwispr/transcribe.py`). That last step is what makes short dictations 5–8x faster than stock Whisper.
 4. The text is pasted (or typed) into the focused window.
 
 Live dictation is Windows-only for now. `transcribe` and `mic-test` are portable.

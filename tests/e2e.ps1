@@ -24,7 +24,12 @@ public static class Keys2 {
 "@
 $LCTRL = 0xA2; $LWIN = 0x5B; $ESC = 0x1B
 
-if (-not $Exe) { $Exe = Join-Path $PSScriptRoot "..\target\release\openwispr.exe" }
+if (-not $Exe) {
+    $Exe = Join-Path $PSScriptRoot "..\.venv\Scripts\openwispr.exe"
+    if (-not (Test-Path $Exe)) {
+        throw "openwispr.exe not found in .venv; run 'uv sync' first (or pass -Exe)"
+    }
+}
 $Exe = (Resolve-Path $Exe).Path
 $Wav = (Resolve-Path $Wav).Path
 $log = Join-Path $env:TEMP "openwispr-e2e.log"
