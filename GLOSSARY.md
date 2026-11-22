@@ -1,8 +1,20 @@
 # OpenWispr
 
-Private, local push-to-talk dictation for Windows. This context holds the vocabulary for controlling dictation from the keyboard and for managing the app from the Tray.
+Private, local push-to-talk dictation for Windows. This context holds the vocabulary for controlling dictation from the keyboard and for managing the app from its window.
 
 ## Language
+
+**Desktop App**:
+The installed Windows application whose window shows Dictation status and whose window close or Quit ends the Instance.
+_Avoid_: tray app, background service, shortcut
+
+**Launch**:
+Opening the Desktop App from the Start Menu, which makes it ready without starting a Dictation.
+_Avoid_: start dictation, autostart, boot
+
+**Instance**:
+One running Desktop App; at most one exists per Windows session.
+_Avoid_: process, session, duplicate window
 
 **Dictation**:
 A single recording session whose recognized words are inserted into the focused application.
@@ -20,14 +32,10 @@ _Avoid_: toggle mode, sticky recording
 The local speech model whose accuracy determines which words are recognized; selected as the default or as an optional alternative.
 _Avoid_: Whisper engine, model file
 
-**Tray**:
-The app control the user right-clicks to Quit.
-_Avoid_: system tray menu, indicator, status icon
-
 **Quit**:
-Ending the running app without removing its autostart installation.
+Ending the Desktop App and its Instance, after any in-progress Dictation finishes.
 _Avoid_: stop, disable, exit
 
-**Autostart**:
-The opt-in installation that launches the app at Windows login.
-_Avoid_: background service, startup task
+**Stop**:
+Ending the current Dictation without ending the Desktop App.
+_Avoid_: quit, exit, cancel
