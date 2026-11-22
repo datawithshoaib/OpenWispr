@@ -23,6 +23,23 @@ uv venv
 uv pip install -e ".[dev]"
 ```
 
+### Build the per-user installer
+
+```bash
+uv run python build_installer.py
+```
+
+The build downloads the default Dictation model and the voice-detection model if needed,
+bundles them with the windowed app, and writes `dist\OpenWisprInstaller.exe`. Run that
+`.exe` to install into your user profile and add a Start Menu entry only. There is no
+administrator prompt, Desktop shortcut, or login entry. Run it again with `uninstall`
+to remove the app, its bundled models, the Start Menu entry, and legacy repository
+shortcuts:
+
+```bash
+dist\OpenWisprInstaller.exe uninstall
+```
+
 ## Use it
 
 ```bash
