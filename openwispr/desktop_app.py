@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import os
 import sys
-import time
 
 from openwispr.hotkey import Action, Chord
 
-DEDUP_WINDOW: float = 5.0
+DEBUG_ENV = "OPENWISPR_DEBUG"
 
 
 class DesktopApp:
@@ -17,14 +17,17 @@ class DesktopApp:
         inserter: object,
         instance_guard: object,
         chord: Chord,
+        debug: bool | None = None,
     ) -> None:
+        self._debug = debug if debug is not None else os.environ.get(DEBUG_ENV, "").strip().lower() in ("1", "true", "yes")
         self._window = window
         self._engine = engine
         self._inserter = inserter
         self._instance_guard = instance_guard
         self._chord = chord
-        self._last_text = ""
-        self._last_time = 0.0
+        self._dictation_active = False
+        self._dictation_pending = False
+        self._inserted_for_dictation = False
         self._launched = False
 
     def launch(self) -> None:
@@ -53,31 +56,41 @@ class DesktopApp:
         self._window.close()
         self._instance_guard.release()
 
+    def _log(self, message: str) -> None:
+        if self._debug and sys.stderr is not None:
+            sys.stderr.write(f"[openwispr] {message}\n")
+            sys.stderr.flush()
+
     def _handle_action(self, action: Action) -> None:
+        self._log(f"chord action {action.name}")
         if action is Action.Start:
             if self._engine.start_recording():
+                self._dictation_active = True
+                self._dictation_pending = False
+                self._inserted_for_dictation = False
                 self._window.show_listening()
         elif action is Action.Stop:
+            self._log("Stop: finishing dictation")
+            if self._dictation_active:
+                self._dictation_active = False
+                self._dictation_pending = True
             self._engine.stop_recording()
             self._window.show_ready(self._chord.label)
         elif action is Action.Cancel:
+            self._dictation_active = False
+            self._dictation_pending = False
             self._engine.cancel_recording()
             self._window.show_ready(self._chord.label)
 
     def _handle_text(self, text: str) -> None:
-        if not text:
+        self._log(f"transcription result: {text}")
+        if not text or not self._dictation_pending or self._inserted_for_dictation:
+            self._log("transcription ignored: no insertion")
             return
-        now = time.time()
-        if text == self._last_text and (now - self._last_time) < DEDUP_WINDOW:
-            if sys.stderr is not None:
-                sys.stderr.write("  (duplicate suppressed)\n")
-                sys.stderr.flush()
-            return
-        self._last_text = text
-        self._last_time = now
+        self._dictation_pending = False
+        self._inserted_for_dictation = True
+        self._log(f"insertion call: {text!r}")
         try:
             self._inserter.insert(f"{text} ")
         except Exception as e:
-            if sys.stderr is not None:
-                sys.stderr.write(f"  could not insert text: {e}\n")
-                sys.stderr.flush()
+            self._log(f"insertion failed: {e}")
