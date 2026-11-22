@@ -90,7 +90,7 @@ def dictate(
     sys.stderr.write(
         f"\nReady. Hold {chord.label} and speak; release to insert the text.\n"
         "Tap it to dictate hands-free, tap again to stop. Esc cancels.\n"
-        "Right-click the Tray and choose Quit. Ctrl+C also quits.\n\n"
+        "Use the window's Quit button or close the window to quit. Ctrl+C also quits.\n\n"
     )
     sys.stderr.flush()
 

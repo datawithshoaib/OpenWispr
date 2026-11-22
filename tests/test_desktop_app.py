@@ -1,21 +1,24 @@
 import time
 
-from openwispr.desktop_app import DesktopApp
+from openwispr.desktop_app import DesktopApp, Status
 from openwispr.hotkey import Action, Chord
 
 
 class FakeWindow:
-    def __init__(self):
+    def __init__(self, events=None):
         self.status = None
+        self.statuses = []
+        self.calls = events if events is not None else []
         self.closed = False
         self.focused = False
+        self.quit_handler = None
 
-    def show_ready(self, chord_label):
-        self.status = "ready"
-        self.chord_label = chord_label
+    def show_status(self, status):
+        self.status = status
+        self.statuses.append(status)
 
-    def show_listening(self):
-        self.status = "listening"
+    def set_quit_handler(self, handler):
+        self.quit_handler = handler
 
     def focus(self):
         self.focused = True
@@ -25,14 +28,20 @@ class FakeWindow:
 
     def close(self):
         self.closed = True
+        self.calls.append("close")
 
 
 class FakeEngine:
-    def __init__(self, transcript=None, start_ok=True):
+    def __init__(self, transcript=None, start_ok=True, pending=False, finish_result=True, events=None):
         self.transcript = transcript
         self.start_ok = start_ok
+        self.pending = pending
+        self.finish_result = finish_result
+        self.finish_timeout = None
+        self.calls = events if events is not None else []
         self.listening = False
         self.recording = False
+        self.busy = False
         self.on_action = None
         self.on_text = None
 
@@ -45,16 +54,33 @@ class FakeEngine:
         self.recording = self.start_ok
         return self.start_ok
 
+    def is_busy(self):
+        return self.recording or self.busy
+
     def stop_recording(self):
         self.recording = False
-        if self.transcript is not None:
+        if self.transcript is None:
+            self.on_text("")
+        elif not self.pending:
+            self.busy = True
             self.on_text(self.transcript)
+            self.busy = False
+
+    def finish(self, timeout):
+        self.finish_timeout = timeout
+        self.recording = False
+        if self.finish_result and self.transcript is not None:
+            self.busy = True
+            self.on_text(self.transcript)
+            self.busy = False
+        return self.finish_result
 
     def cancel_recording(self):
         self.recording = False
 
     def stop_listening(self):
         self.listening = False
+        self.calls.append("stop_listening")
 
 
 class FakeInserter:
@@ -79,9 +105,17 @@ class FakeInstanceGuard:
         self.released = True
 
 
-def make_app(acquired=True, transcript=None, start_ok=True, debug=False):
-    window = FakeWindow()
-    engine = FakeEngine(transcript, start_ok)
+def make_app(
+    acquired=True,
+    transcript=None,
+    start_ok=True,
+    pending=False,
+    finish_result=True,
+    debug=False,
+):
+    events = []
+    window = FakeWindow(events)
+    engine = FakeEngine(transcript, start_ok, pending, finish_result, events)
     inserter = FakeInserter()
     guard = FakeInstanceGuard(acquired)
     app = DesktopApp(
@@ -95,12 +129,13 @@ def make_app(acquired=True, transcript=None, start_ok=True, debug=False):
     return app, window, engine, inserter, guard
 
 
-def test_launch_makes_desktop_app_ready_without_starting_dictation():
+def test_launch_opens_window_at_idle_without_starting_dictation():
     app, window, engine, _, _ = make_app()
 
     app.launch()
 
-    assert (window.status, engine.listening, engine.recording) == ("ready", True, False)
+    assert (window.status, engine.listening, engine.recording) == (Status.Idle, True, False)
+    assert window.quit_handler is not None
 
 
 def test_chord_start_begins_dictation():
@@ -109,10 +144,10 @@ def test_chord_start_begins_dictation():
 
     engine.on_action(Action.Start)
 
-    assert (engine.recording, window.status) == (True, "listening")
+    assert (engine.recording, window.status) == (True, Status.Listening)
 
 
-def test_stop_finishes_dictation_and_inserts_text_once():
+def test_stop_shows_transcribing_then_inserts_text_once_and_returns_to_idle():
     app, window, engine, inserter, _ = make_app(transcript="hello world")
     app.launch()
     engine.on_action(Action.Start)
@@ -121,9 +156,10 @@ def test_stop_finishes_dictation_and_inserts_text_once():
 
     assert (engine.recording, window.status, inserter.inserted) == (
         False,
-        "ready",
+        Status.Idle,
         ["hello world "],
     )
+    assert Status.Transcribing in window.statuses
 
 
 def test_repeated_transcript_is_not_inserted_twice():
@@ -225,7 +261,7 @@ def test_cancel_ends_dictation_without_insertion():
 
     engine.on_action(Action.Cancel)
 
-    assert (engine.recording, window.status, inserter.inserted) == (False, "ready", [])
+    assert (engine.recording, window.status, inserter.inserted) == (False, Status.Idle, [])
 
 
 def test_quit_ends_the_desktop_app_instance():
@@ -237,10 +273,49 @@ def test_quit_ends_the_desktop_app_instance():
     assert (engine.listening, window.closed, guard.released) == (False, True, True)
 
 
-def test_microphone_failure_keeps_desktop_app_ready():
+def test_window_close_finishes_dictation_before_quitting():
+    app, window, engine, inserter, guard = make_app(transcript="hello world", pending=True)
+    app.launch()
+    engine.on_action(Action.Start)
+
+    window.quit_handler()
+
+    assert window.statuses == [Status.Idle, Status.Listening, Status.Finishing]
+    assert inserter.inserted == ["hello world "]
+    assert engine.finish_timeout == 30.0
+    assert engine.calls.index("stop_listening") < window.calls.index("close")
+    assert (window.closed, guard.released) == (True, True)
+
+
+def test_empty_transcript_returns_window_to_idle_without_insertion():
+    app, window, engine, inserter, _ = make_app()
+    app.launch()
+    engine.on_action(Action.Start)
+
+    engine.on_action(Action.Stop)
+
+    assert (window.status, inserter.inserted) == (Status.Idle, [])
+
+
+def test_finish_timeout_logs_and_still_quits(capsys):
+    app, window, engine, inserter, guard = make_app(
+        transcript="hello world", pending=True, finish_result=False
+    )
+    app.launch()
+    engine.on_action(Action.Start)
+
+    window.quit_handler()
+
+    assert engine.finish_timeout == 30.0
+    assert inserter.inserted == []
+    assert (window.closed, guard.released) == (True, True)
+    assert "30" in capsys.readouterr().err
+
+
+def test_microphone_failure_keeps_desktop_app_idle():
     app, window, engine, _, _ = make_app(start_ok=False)
     app.launch()
 
     engine.on_action(Action.Start)
 
-    assert (engine.recording, window.status) == (False, "ready")
+    assert (engine.recording, window.status) == (False, Status.Idle)

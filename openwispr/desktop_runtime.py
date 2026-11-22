@@ -9,9 +9,10 @@ from typing import Callable
 
 import numpy as np
 
-from openwispr import audio, platform_win, tray
+from openwispr import audio, platform_win
 from openwispr.desktop_app import DesktopApp
 from openwispr.hotkey import Action, Chord
+from openwispr.window import TkWindow
 
 
 class FakeMicSource:
@@ -58,32 +59,6 @@ class TextInserter:
             platform_win.paste_text(text)
 
 
-class TrayWindow:
-    def __init__(self, chord_label: str) -> None:
-        self._quit_queue: Queue[tray.TrayCommand] = Queue()
-        self._tray = tray.spawn_tray(chord_label, self._quit_queue)
-
-    def show_ready(self, chord_label: str) -> None:
-        self._tray.send(tray.TrayCommand.StopListening)
-
-    def show_listening(self) -> None:
-        self._tray.send(tray.TrayCommand.StartListening)
-
-    def focus(self) -> None:
-        pass
-
-    def run(self) -> None:
-        while True:
-            try:
-                if self._quit_queue.get(timeout=0.2) is tray.TrayCommand.Quit:
-                    return
-            except Empty:
-                continue
-
-    def close(self) -> None:
-        self._tray.send(tray.TrayCommand.Quit)
-
-
 class NoOpInstanceGuard:
     def acquire(self) -> bool:
         return True
@@ -110,6 +85,11 @@ class HotkeyDictationEngine:
         self._on_action: Callable[[Action], None] | None = None
         self._on_text: Callable[[str], None] | None = None
         self._stopping = threading.Event()
+        self._state = threading.Condition()
+        self._recording = False
+        self._pending = 0
+        self._action_thread: threading.Thread | None = None
+        self._worker_thread: threading.Thread | None = None
 
     def start_listening(
         self,
@@ -119,9 +99,15 @@ class HotkeyDictationEngine:
         self._on_action = on_action
         self._on_text = on_text
         self._stopping.clear()
-        threading.Thread(target=self._worker, name="dictation-worker", daemon=True).start()
+        self._worker_thread = threading.Thread(
+            target=self._worker, name="dictation-worker", daemon=True
+        )
+        self._worker_thread.start()
         platform_win.spawn_hotkey_listener(self._chord, self._action_queue)
-        threading.Thread(target=self._forward_actions, name="dictation-actions", daemon=True).start()
+        self._action_thread = threading.Thread(
+            target=self._forward_actions, name="dictation-actions", daemon=True
+        )
+        self._action_thread.start()
 
     def start_recording(self) -> bool:
         try:
@@ -129,30 +115,63 @@ class HotkeyDictationEngine:
         except Exception as e:
             self._write(f"  microphone error: {e}\n")
             return False
+        with self._state:
+            self._recording = True
         self._cue(platform_win.Cue.Start)
         self._write("● listening...\n")
         return True
 
+    def is_busy(self) -> bool:
+        with self._state:
+            return self._recording or self._pending > 0
+
+    def finish(self, timeout: float) -> bool:
+        self.stop_recording()
+        deadline = time.monotonic() + timeout
+        with self._state:
+            while self._pending > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._state.wait(remaining)
+        return True
+
     def stop_recording(self) -> None:
-        if not self._source.is_recording():
-            return
+        with self._state:
+            if not self._recording:
+                return
+            self._recording = False
         self._cue(platform_win.Cue.Stop)
         samples = self._source.stop()
         if audio.is_silence(samples):
             self._write("  (too short or silent, ignored)\n")
+            if self._on_text is not None:
+                self._on_text("")
         else:
+            with self._state:
+                self._pending += 1
             self._work_queue.put(samples)
 
     def cancel_recording(self) -> None:
-        if not self._source.is_recording():
-            return
+        with self._state:
+            if not self._recording:
+                return
+            self._recording = False
         self._source.stop()
         self._cue(platform_win.Cue.Cancel)
         self._write("  cancelled\n")
 
     def stop_listening(self) -> None:
         self._stopping.set()
+        self.stop_recording()
         self._work_queue.put(None)
+        platform_win.stop_hotkey_listener()
+        self._join(self._action_thread)
+        self._join(self._worker_thread)
+
+    def _join(self, thread: threading.Thread | None) -> None:
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=1.0)
 
     def _forward_actions(self) -> None:
         while not self._stopping.is_set():
@@ -170,19 +189,25 @@ class HotkeyDictationEngine:
             samples = self._work_queue.get()
             if samples is None:
                 break
-            secs = len(samples) / audio.WHISPER_RATE
-            start = time.time()
+            text = ""
             try:
+                secs = len(samples) / audio.WHISPER_RATE
+                start = time.time()
                 text = self._transcriber.transcribe(samples)
                 if not text:
                     self._write("  (no speech detected)\n")
                 else:
                     duration = time.time() - start
                     self._write(f"  {secs:.1f}s -> {duration:.2f}s: {text}\n")
-                    if self._on_text is not None:
-                        self._on_text(text)
             except Exception as e:
                 self._write(f"  {e}\n")
+            try:
+                if self._on_text is not None:
+                    self._on_text(text)
+            finally:
+                with self._state:
+                    self._pending -= 1
+                    self._state.notify_all()
 
     def _cue(self, cue: platform_win.Cue) -> None:
         if self._sound:
@@ -212,7 +237,7 @@ def build_desktop_app(
         sound=not no_sound,
     )
     return DesktopApp(
-        window=TrayWindow(chord.label),
+        window=TkWindow(chord.label),
         engine=engine,
         inserter=TextInserter(use_typing),
         instance_guard=NoOpInstanceGuard(),

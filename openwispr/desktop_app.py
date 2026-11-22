@@ -2,10 +2,23 @@ from __future__ import annotations
 
 import os
 import sys
+from enum import Enum, auto
 
 from openwispr.hotkey import Action, Chord
 
 DEBUG_ENV = "OPENWISPR_DEBUG"
+FINISH_TIMEOUT: float = 30.0
+
+
+class Status(Enum):
+    Idle = auto()
+    Listening = auto()
+    Transcribing = auto()
+    Finishing = auto()
+
+    @property
+    def label(self) -> str:
+        return self.name
 
 
 class DesktopApp:
@@ -29,13 +42,15 @@ class DesktopApp:
         self._dictation_pending = False
         self._inserted_for_dictation = False
         self._launched = False
+        self._quitting = False
 
     def launch(self) -> None:
         if not self._instance_guard.acquire():
             self._window.focus()
             return
         self._launched = True
-        self._window.show_ready(self._chord.label)
+        self._window.set_quit_handler(self.quit)
+        self._window.show_status(Status.Idle)
         self._engine.start_listening(self._handle_action, self._handle_text)
 
     def run(self) -> None:
@@ -49,12 +64,21 @@ class DesktopApp:
             self.quit()
 
     def quit(self) -> None:
-        if not self._launched:
+        if not self._launched or self._quitting:
             return
-        self._launched = False
+        self._quitting = True
+        if self._dictation_active:
+            self._dictation_active = False
+            self._dictation_pending = True
+        if self._engine.is_busy():
+            self._window.show_status(Status.Finishing)
+            if not self._engine.finish(timeout=FINISH_TIMEOUT):
+                self._write(f"  finishing timed out after {FINISH_TIMEOUT:g}s; quitting\n")
         self._engine.stop_listening()
         self._window.close()
         self._instance_guard.release()
+        self._launched = False
+        self._quitting = False
 
     def _log(self, message: str) -> None:
         if self._debug and sys.stderr is not None:
@@ -68,22 +92,26 @@ class DesktopApp:
                 self._dictation_active = True
                 self._dictation_pending = False
                 self._inserted_for_dictation = False
-                self._window.show_listening()
+                self._window.show_status(Status.Listening)
         elif action is Action.Stop:
             self._log("Stop: finishing dictation")
             if self._dictation_active:
                 self._dictation_active = False
                 self._dictation_pending = True
+            self._window.show_status(Status.Transcribing)
             self._engine.stop_recording()
-            self._window.show_ready(self._chord.label)
+            if not self._engine.is_busy():
+                self._window.show_status(Status.Idle)
         elif action is Action.Cancel:
             self._dictation_active = False
             self._dictation_pending = False
             self._engine.cancel_recording()
-            self._window.show_ready(self._chord.label)
+            self._window.show_status(Status.Idle)
 
     def _handle_text(self, text: str) -> None:
         self._log(f"transcription result: {text}")
+        if not self._quitting:
+            self._window.show_status(Status.Idle)
         if not text or not self._dictation_pending or self._inserted_for_dictation:
             self._log("transcription ignored: no insertion")
             return
@@ -94,3 +122,9 @@ class DesktopApp:
             self._inserter.insert(f"{text} ")
         except Exception as e:
             self._log(f"insertion failed: {e}")
+
+    @staticmethod
+    def _write(message: str) -> None:
+        if sys.stderr is not None:
+            sys.stderr.write(message)
+            sys.stderr.flush()
