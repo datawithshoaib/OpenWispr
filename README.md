@@ -39,14 +39,14 @@ model (under 1 MB) into `%LOCALAPPDATA%\OpenWispr\models`. After that it works o
 | Tap **Ctrl+Win** quickly | Hands-free mode: keep talking, tap again to finish |
 | **Esc** while hands-free | Cancel, nothing is inserted |
 | Ctrl+Win + another key (e.g. Ctrl+Win+→) | Treated as a normal shortcut; dictation is cancelled |
-| Right-click the Tray → Quit | Ends the app; autostart stays installed |
+| Click Quit or close the window | Finishes any Dictation, then ends the app |
 
 You hear a short rising beep when recording starts and a falling one when it stops.
 
 ### Start without a terminal
 
 ```bash
-openwispr install-desktop-shortcut      # double-click to start hidden
+openwispr install-desktop-shortcut      # double-click to open the app window
 openwispr uninstall-desktop-shortcut
 ```
 
@@ -57,7 +57,7 @@ openwispr install-autostart     # add a Startup-folder shortcut (no console)
 openwispr uninstall-autostart   # remove it
 ```
 
-Quit from the Tray ends the running app but leaves the shortcuts installed.
+Quit from the app window ends the running app but leaves the shortcuts installed.
 
 ### Options
 
