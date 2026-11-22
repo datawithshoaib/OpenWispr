@@ -1,3 +1,5 @@
+import time
+
 from openwispr.desktop_app import DesktopApp
 from openwispr.hotkey import Action, Chord
 
@@ -77,7 +79,7 @@ class FakeInstanceGuard:
         self.released = True
 
 
-def make_app(acquired=True, transcript=None, start_ok=True):
+def make_app(acquired=True, transcript=None, start_ok=True, debug=False):
     window = FakeWindow()
     engine = FakeEngine(transcript, start_ok)
     inserter = FakeInserter()
@@ -88,6 +90,7 @@ def make_app(acquired=True, transcript=None, start_ok=True):
         inserter=inserter,
         instance_guard=guard,
         chord=Chord.parse("ctrl+win"),
+        debug=debug,
     )
     return app, window, engine, inserter, guard
 
@@ -129,6 +132,87 @@ def test_repeated_transcript_is_not_inserted_twice():
     engine.on_action(Action.Start)
     engine.on_action(Action.Stop)
 
+    engine.on_text("hello world")
+
+    assert inserter.inserted == ["hello world "]
+
+
+def test_nothing_is_logged_by_default(capsys):
+    app, _, engine, _, _ = make_app(transcript="hello world")
+    app.launch()
+    engine.on_action(Action.Start)
+
+    engine.on_action(Action.Stop)
+
+    captured = capsys.readouterr()
+    assert (captured.out, captured.err) == ("", "")
+
+
+def test_second_stop_does_not_insert_again():
+    app, _, engine, inserter, _ = make_app(transcript="hello world")
+    app.launch()
+    engine.on_action(Action.Start)
+
+    engine.on_action(Action.Stop)
+    engine.on_action(Action.Stop)
+
+    assert inserter.inserted == ["hello world "]
+
+
+def test_same_sentence_in_separate_dictations_is_inserted_twice():
+    app, _, engine, inserter, _ = make_app(transcript="hello world")
+    app.launch()
+
+    for _ in range(2):
+        engine.on_action(Action.Start)
+        engine.on_action(Action.Stop)
+
+    assert inserter.inserted == ["hello world ", "hello world "]
+
+
+def test_stop_without_a_dictation_does_not_allow_insertion():
+    app, _, engine, inserter, _ = make_app()
+    app.launch()
+
+    engine.on_action(Action.Stop)
+    engine.on_text("stray words")
+
+    assert inserter.inserted == []
+
+
+def test_transcription_without_a_dictation_is_not_inserted():
+    app, _, engine, inserter, _ = make_app()
+    app.launch()
+
+    engine.on_text("stray words")
+
+    assert inserter.inserted == []
+
+
+def test_debug_logs_chord_stop_transcription_and_insertion(capsys):
+    app, _, engine, _, _ = make_app(transcript="hello world", debug=True)
+    app.launch()
+    engine.on_action(Action.Start)
+
+    engine.on_action(Action.Stop)
+
+    logged = capsys.readouterr().err
+    assert "chord action Start" in logged
+    assert "chord action Stop" in logged
+    assert "Stop: finishing dictation" in logged
+    assert "transcription result: hello world" in logged
+    assert "insertion call:" in logged
+
+
+def test_one_dictation_inserts_once_even_after_dedup_window(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    app, _, engine, inserter, _ = make_app(transcript="hello world")
+    app.launch()
+    engine.on_action(Action.Start)
+
+    engine.on_action(Action.Stop)
+    clock[0] += 10
     engine.on_text("hello world")
 
     assert inserter.inserted == ["hello world "]
