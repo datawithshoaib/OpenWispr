@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Callable
 from enum import Enum, auto
 
 from openwispr.hotkey import Action, Chord
@@ -25,16 +26,20 @@ class DesktopApp:
     def __init__(
         self,
         *,
-        window: object,
-        engine: object,
+        window: object | None = None,
+        engine: object | None = None,
         inserter: object,
         instance_guard: object,
         chord: Chord,
         debug: bool | None = None,
+        window_factory: Callable[[], object] | None = None,
+        engine_factory: Callable[[], object] | None = None,
     ) -> None:
         self._debug = debug if debug is not None else os.environ.get(DEBUG_ENV, "").strip().lower() in ("1", "true", "yes")
-        self._window = window
-        self._engine = engine
+        self._window_factory = window_factory if window_factory is not None else lambda: window
+        self._engine_factory = engine_factory if engine_factory is not None else lambda: engine
+        self._window: object | None = None
+        self._engine: object | None = None
         self._inserter = inserter
         self._instance_guard = instance_guard
         self._chord = chord
@@ -44,14 +49,17 @@ class DesktopApp:
         self._launched = False
         self._quitting = False
 
-    def launch(self) -> None:
+    def launch(self) -> bool:
         if not self._instance_guard.acquire():
-            self._window.focus()
-            return
+            self._instance_guard.focus_existing()
+            return False
         self._launched = True
+        self._window = self._window_factory()
+        self._engine = self._engine_factory()
         self._window.set_quit_handler(self.quit)
         self._window.show_status(Status.Idle)
         self._engine.start_listening(self._handle_action, self._handle_text)
+        return True
 
     def run(self) -> None:
         if not self._launched:

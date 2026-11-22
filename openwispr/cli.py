@@ -85,7 +85,8 @@ def dictate(
         fake_mic=fake_mic,
     )
 
-    app.launch()
+    if not app.launch():
+        return
 
     sys.stderr.write(
         f"\nReady. Hold {chord.label} and speak; release to insert the text.\n"

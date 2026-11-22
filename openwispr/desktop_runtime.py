@@ -12,6 +12,7 @@ import numpy as np
 from openwispr import audio, platform_win
 from openwispr.desktop_app import DesktopApp
 from openwispr.hotkey import Action, Chord
+from openwispr.instance import SessionInstanceGuard
 from openwispr.window import TkWindow
 
 
@@ -57,14 +58,6 @@ class TextInserter:
             platform_win.type_text(text)
         else:
             platform_win.paste_text(text)
-
-
-class NoOpInstanceGuard:
-    def acquire(self) -> bool:
-        return True
-
-    def release(self) -> None:
-        pass
 
 
 class HotkeyDictationEngine:
@@ -228,18 +221,17 @@ def build_desktop_app(
     use_typing: bool,
     no_sound: bool,
     fake_mic: str | None,
+    instance_guard: object | None = None,
 ) -> DesktopApp:
-    source = AudioSource(fake_mic, device)
-    engine = HotkeyDictationEngine(
-        chord=chord,
-        source=source,
-        transcriber=transcriber,
-        sound=not no_sound,
-    )
     return DesktopApp(
-        window=TkWindow(chord.label),
-        engine=engine,
+        window_factory=lambda: TkWindow(chord.label),
+        engine_factory=lambda: HotkeyDictationEngine(
+            chord=chord,
+            source=AudioSource(fake_mic, device),
+            transcriber=transcriber,
+            sound=not no_sound,
+        ),
         inserter=TextInserter(use_typing),
-        instance_guard=NoOpInstanceGuard(),
+        instance_guard=instance_guard if instance_guard is not None else SessionInstanceGuard(),
         chord=chord,
     )
