@@ -53,6 +53,36 @@ def test_ensure_output_streams_without_console(monkeypatch, tmp_path):
     assert "hello" in log.read_text(encoding="utf-8")
 
 
+def test_second_launch_exits_without_ready_message(monkeypatch, capsys):
+    class RejectedApp:
+        def __init__(self):
+            self.ran = False
+
+        def launch(self):
+            return False
+
+        def run(self):
+            self.ran = True
+
+    app = RejectedApp()
+    monkeypatch.setattr(cli, "load_transcriber", lambda *args: type("T", (), {"transcribe": lambda self, samples: ""})())
+    monkeypatch.setattr("openwispr.desktop_runtime.build_desktop_app", lambda **kwargs: app)
+
+    cli.dictate(
+        model_name="tiny.en",
+        language=None,
+        threads=None,
+        hotkey_spec="ctrl+win",
+        device=None,
+        use_typing=False,
+        no_sound=False,
+        fake_mic=None,
+    )
+
+    assert app.ran is False
+    assert "Ready" not in capsys.readouterr().err
+
+
 def test_version(capsys):
     with pytest.raises(SystemExit) as e:
         cli.build_parser().parse_args(["--version"])

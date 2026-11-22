@@ -95,11 +95,15 @@ class FakeInstanceGuard:
     def __init__(self, acquired=True):
         self.acquired = acquired
         self.acquire_count = 0
+        self.focus_count = 0
         self.released = False
 
     def acquire(self):
         self.acquire_count += 1
         return self.acquired
+
+    def focus_existing(self):
+        self.focus_count += 1
 
     def release(self):
         self.released = True
@@ -130,12 +134,42 @@ def make_app(
 
 
 def test_launch_opens_window_at_idle_without_starting_dictation():
-    app, window, engine, _, _ = make_app()
+    app, window, engine, _, guard = make_app()
 
-    app.launch()
+    launched = app.launch()
 
+    assert launched is True
+    assert guard.acquire_count == 1
     assert (window.status, engine.listening, engine.recording) == (Status.Idle, True, False)
     assert window.quit_handler is not None
+
+
+def test_second_launch_focuses_existing_instance_without_starting_engine():
+    app, window, engine, _, guard = make_app(acquired=False)
+
+    launched = app.launch()
+
+    assert launched is False
+    assert (guard.focus_count, window.focused, guard.released) == (1, False, False)
+    assert (engine.listening, window.statuses, window.quit_handler) == (False, [], None)
+
+
+def test_refused_launch_does_not_build_window_or_engine():
+    guard = FakeInstanceGuard(acquired=False)
+    built = []
+    app = DesktopApp(
+        window_factory=lambda: built.append("window") or FakeWindow(),
+        engine_factory=lambda: built.append("engine") or FakeEngine(),
+        inserter=FakeInserter(),
+        instance_guard=guard,
+        chord=Chord.parse("ctrl+win"),
+    )
+
+    launched = app.launch()
+
+    assert launched is False
+    assert built == []
+    assert guard.focus_count == 1
 
 
 def test_chord_start_begins_dictation():
