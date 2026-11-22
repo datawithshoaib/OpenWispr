@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 import threading
 import time
 from pathlib import Path
@@ -10,8 +9,11 @@ from typing import Callable
 import numpy as np
 
 from openwispr import audio, platform_win
+from openwispr.config import DesktopConfig
 from openwispr.desktop_app import DesktopApp
-from openwispr.hotkey import Action, Chord
+from openwispr.dictation import Dictation
+from openwispr.hotkey import Action
+from openwispr.output import write_stderr
 from openwispr.instance import SessionInstanceGuard
 from openwispr.window import TkWindow
 
@@ -35,18 +37,18 @@ class FakeMicSource:
 class AudioSource:
     def __init__(self, fake_mic: str | Path | None, device: str | None) -> None:
         if fake_mic:
-            self.inner = FakeMicSource(Path(fake_mic))
+            self._mic_source = FakeMicSource(Path(fake_mic))
         else:
-            self.inner = audio.Recorder(device)
+            self._mic_source = audio.Recorder(device)
 
     def start(self) -> None:
-        self.inner.start()
+        self._mic_source.start()
 
     def is_recording(self) -> bool:
-        return self.inner.is_recording()
+        return self._mic_source.is_recording()
 
     def stop(self) -> np.ndarray:
-        return self.inner.stop()
+        return self._mic_source.stop()
 
 
 class TextInserter:
@@ -74,12 +76,13 @@ class HotkeyDictationEngine:
         self._transcriber = transcriber
         self._sound = sound
         self._action_queue: Queue[Action] = Queue()
-        self._work_queue: Queue[np.ndarray | None] = Queue()
+        self._work_queue: Queue[tuple[Dictation, np.ndarray] | None] = Queue()
         self._on_action: Callable[[Action], None] | None = None
-        self._on_text: Callable[[str], None] | None = None
+        self._on_text: Callable[[str, Dictation], None] | None = None
         self._stopping = threading.Event()
         self._state = threading.Condition()
         self._recording = False
+        self._dictation: Dictation | None = None
         self._pending = 0
         self._action_thread: threading.Thread | None = None
         self._worker_thread: threading.Thread | None = None
@@ -87,7 +90,7 @@ class HotkeyDictationEngine:
     def start_listening(
         self,
         on_action: Callable[[Action], None],
-        on_text: Callable[[str], None],
+        on_text: Callable[[str, Dictation], None],
     ) -> None:
         self._on_action = on_action
         self._on_text = on_text
@@ -102,7 +105,7 @@ class HotkeyDictationEngine:
         )
         self._action_thread.start()
 
-    def start_recording(self) -> bool:
+    def start_recording(self, dictation: Dictation) -> bool:
         try:
             self._source.start()
         except Exception as e:
@@ -110,6 +113,7 @@ class HotkeyDictationEngine:
             return False
         with self._state:
             self._recording = True
+            self._dictation = dictation
         self._cue(platform_win.Cue.Start)
         self._write("● listening...\n")
         return True
@@ -134,22 +138,27 @@ class HotkeyDictationEngine:
             if not self._recording:
                 return
             self._recording = False
+            dictation = self._dictation
+            self._dictation = None
+        if dictation is None:
+            return
         self._cue(platform_win.Cue.Stop)
         samples = self._source.stop()
         if audio.is_silence(samples):
             self._write("  (too short or silent, ignored)\n")
             if self._on_text is not None:
-                self._on_text("")
+                self._on_text("", dictation)
         else:
             with self._state:
                 self._pending += 1
-            self._work_queue.put(samples)
+            self._work_queue.put((dictation, samples))
 
     def cancel_recording(self) -> None:
         with self._state:
             if not self._recording:
                 return
             self._recording = False
+            self._dictation = None
         self._source.stop()
         self._cue(platform_win.Cue.Cancel)
         self._write("  cancelled\n")
@@ -179,9 +188,10 @@ class HotkeyDictationEngine:
 
     def _worker(self) -> None:
         while True:
-            samples = self._work_queue.get()
-            if samples is None:
+            work = self._work_queue.get()
+            if work is None:
                 break
+            dictation, samples = work
             text = ""
             try:
                 secs = len(samples) / audio.WHISPER_RATE
@@ -196,7 +206,7 @@ class HotkeyDictationEngine:
                 self._write(f"  {e}\n")
             try:
                 if self._on_text is not None:
-                    self._on_text(text)
+                    self._on_text(text, dictation)
             finally:
                 with self._state:
                     self._pending -= 1
@@ -208,30 +218,24 @@ class HotkeyDictationEngine:
 
     @staticmethod
     def _write(message: str) -> None:
-        if sys.stderr is not None:
-            sys.stderr.write(message)
-            sys.stderr.flush()
+        write_stderr(message)
 
 
 def build_desktop_app(
     *,
-    chord: Chord,
+    config: DesktopConfig,
     transcriber: object,
-    device: str | None,
-    use_typing: bool,
-    no_sound: bool,
-    fake_mic: str | None,
     instance_guard: object | None = None,
 ) -> DesktopApp:
     return DesktopApp(
-        window_factory=lambda: TkWindow(chord.label),
+        window_factory=lambda: TkWindow(),
         engine_factory=lambda: HotkeyDictationEngine(
-            chord=chord,
-            source=AudioSource(fake_mic, device),
+            chord=config.chord,
+            source=AudioSource(config.fake_mic, config.device),
             transcriber=transcriber,
-            sound=not no_sound,
+            sound=not config.no_sound,
         ),
-        inserter=TextInserter(use_typing),
+        inserter=TextInserter(config.use_typing),
         instance_guard=instance_guard if instance_guard is not None else SessionInstanceGuard(),
-        chord=chord,
+        config=config,
     )

@@ -12,6 +12,31 @@ from openwispr import model
 ROOT = Path(__file__).resolve().parent
 APP_EXE = "OpenWispr.exe"
 INSTALLER_EXE = "OpenWisprInstaller.exe"
+COMMON_FLAGS = ("--noconfirm", "--clean", "--onefile")
+
+
+def pyinstaller_flags(
+    *,
+    name: str,
+    windowed: bool,
+    root: Path,
+    payload: Path | None = None,
+) -> list[str]:
+    flags = [
+        *COMMON_FLAGS,
+        "--windowed" if windowed else "--console",
+        "--name",
+        name,
+        "--distpath",
+        str(root / "dist"),
+        "--workpath",
+        str(root / "build"),
+        "--specpath",
+        str(root / "build"),
+    ]
+    if payload is not None:
+        flags.extend(["--add-data", f"{payload}{os.pathsep}payload"])
+    return flags
 
 
 def run_pyinstaller(*args: str) -> None:
@@ -39,18 +64,7 @@ def main() -> None:
 
     if not args.skip_app_build:
         run_pyinstaller(
-            "--noconfirm",
-            "--clean",
-            "--onefile",
-            "--windowed",
-            "--name",
-            "OpenWispr",
-            "--distpath",
-            str(ROOT / "dist"),
-            "--workpath",
-            str(ROOT / "build"),
-            "--specpath",
-            str(ROOT / "build"),
+            *pyinstaller_flags(name="OpenWispr", windowed=True, root=ROOT),
             str(ROOT / "openwispr" / "__main__.py"),
         )
         shutil.copy2(ROOT / "dist" / APP_EXE, payload / APP_EXE)
@@ -58,20 +72,7 @@ def main() -> None:
         raise RuntimeError(f"payload is missing {payload / APP_EXE}")
 
     run_pyinstaller(
-        "--noconfirm",
-        "--clean",
-        "--onefile",
-        "--console",
-        "--name",
-        "OpenWisprInstaller",
-        "--add-data",
-        f"{payload}{os.pathsep}payload",
-        "--distpath",
-        str(ROOT / "dist"),
-        "--workpath",
-        str(ROOT / "build"),
-        "--specpath",
-        str(ROOT / "build"),
+        *pyinstaller_flags(name="OpenWisprInstaller", windowed=False, root=ROOT, payload=payload),
         str(ROOT / "openwispr" / "installer.py"),
     )
     print(f"Installer: {ROOT / 'dist' / INSTALLER_EXE}")

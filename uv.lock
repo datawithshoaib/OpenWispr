@@ -586,11 +586,6 @@ dependencies = [
     { name = "sounddevice" },
 ]
 
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-]
-
 [package.dev-dependencies]
 dev = [
     { name = "pyinstaller" },
@@ -600,12 +595,10 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "numpy", specifier = ">=1.24.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pywhispercpp", specifier = ">=1.5.0" },
     { name = "requests", specifier = ">=2.28.0" },
     { name = "sounddevice", specifier = ">=0.4.6" },
 ]
-provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
 dev = [

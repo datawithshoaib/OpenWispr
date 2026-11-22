@@ -1,9 +1,8 @@
-import json
 import subprocess
 import sys
 from pathlib import Path
 
-from openwispr import installer, model
+from openwispr import installer, model, shortcut
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -30,39 +29,6 @@ def paths(root, payload):
     )
 
 
-def ps_quote(value):
-    return "'" + str(value).replace("'", "''") + "'"
-
-
-def create_shortcut(path, target, arguments="", working_directory=""):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    script = (
-        f"$s = (New-Object -ComObject WScript.Shell).CreateShortcut({ps_quote(path)}); "
-        f"$s.TargetPath = {ps_quote(target)}; "
-        f"$s.Arguments = {ps_quote(arguments)}; "
-        f"$s.WorkingDirectory = {ps_quote(working_directory)}; $s.Save()"
-    )
-    subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-
-def shortcut_info(path):
-    script = (
-        f"$s = (New-Object -ComObject WScript.Shell).CreateShortcut({ps_quote(path)}); "
-        "[pscustomobject]@{TargetPath=$s.TargetPath;Arguments=$s.Arguments;"
-        "WorkingDirectory=$s.WorkingDirectory} | ConvertTo-Json -Compress"
-    )
-    out = subprocess.check_output(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-        text=True,
-    )
-    return json.loads(out)
-
-
 def test_install_creates_start_menu_entry_without_desktop_or_startup_shortcuts(tmp_path):
     payload = fake_payload(tmp_path)
     location = paths(tmp_path, payload)
@@ -71,7 +37,7 @@ def test_install_creates_start_menu_entry_without_desktop_or_startup_shortcuts(t
 
     entry = location.start_menu_dir / "OpenWispr.lnk"
     assert entry.exists()
-    assert shortcut_info(entry)["TargetPath"] == str(location.install_dir / "OpenWispr.exe")
+    assert shortcut.read_shortcut(entry)["TargetPath"] == str(location.install_dir / "OpenWispr.exe")
     assert not (location.desktop_dir / "OpenWispr.lnk").exists()
     assert not (location.startup_dir / "OpenWispr.lnk").exists()
 
@@ -113,17 +79,17 @@ def test_uninstall_removes_legacy_repository_shortcuts(tmp_path):
     pythonw.write_bytes(b"fake pythonw")
     desktop_legacy = location.desktop_dir / "OpenWispr.lnk"
     startup_legacy = location.startup_dir / "OpenWispr.lnk"
-    create_shortcut(desktop_legacy, pythonw, "-m openwispr", repo)
-    create_shortcut(startup_legacy, pythonw, "-m openwispr", repo)
+    shortcut.create_shortcut(desktop_legacy, pythonw, "-m openwispr", repo)
+    shortcut.create_shortcut(startup_legacy, pythonw, "-m openwispr", repo)
     unrelated = location.desktop_dir / "Other App.lnk"
-    create_shortcut(unrelated, pythonw, "-m other_app", repo)
+    shortcut.create_shortcut(unrelated, pythonw, "-m other_app", repo)
 
     installer.uninstall(location)
 
     assert not desktop_legacy.exists()
     assert not startup_legacy.exists()
     assert unrelated.exists()
-    assert shortcut_info(unrelated)["Arguments"] == "-m other_app"
+    assert shortcut.read_shortcut(unrelated)["Arguments"] == "-m other_app"
 
 
 def test_entry_point_installs_and_uninstalls_with_injected_paths(tmp_path):
@@ -151,6 +117,45 @@ def test_entry_point_installs_and_uninstalls_with_injected_paths(tmp_path):
     assert installer.main(["uninstall", *common]) == 0
     assert not (location.start_menu_dir / "OpenWispr.lnk").exists()
     assert not location.install_dir.exists()
+
+
+def test_shared_shortcut_command_creates_and_reads(tmp_path):
+    target = tmp_path / "App.exe"
+    target.write_bytes(b"fake app")
+    link = tmp_path / "links" / "App.lnk"
+
+    assert shortcut.main(
+        [
+            "create",
+            str(link),
+            str(target),
+            "--arguments",
+            "-m openwispr",
+            "--working-directory",
+            str(tmp_path),
+        ]
+    ) == 0
+
+    info = shortcut.read_shortcut(link)
+    assert info["TargetPath"] == str(target)
+    assert info["Arguments"] == "-m openwispr"
+    assert info["WorkingDirectory"] == str(tmp_path)
+
+
+def test_uninstall_removes_legacy_shortcut_with_empty_arguments(tmp_path):
+    payload = fake_payload(tmp_path)
+    location = paths(tmp_path, payload)
+
+    repo = tmp_path / "repo"
+    pythonw = repo / ".venv" / "Scripts" / "pythonw.exe"
+    pythonw.parent.mkdir(parents=True)
+    pythonw.write_bytes(b"fake pythonw")
+    legacy = location.desktop_dir / "OpenWispr.lnk"
+    shortcut.create_shortcut(legacy, pythonw, "", repo)
+
+    installer.uninstall(location)
+
+    assert not legacy.exists()
 
 
 def test_installer_e2e_check_runs_against_temporary_locations(tmp_path):

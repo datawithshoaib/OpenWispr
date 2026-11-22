@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from openwispr import __version__, audio, autostart, model, transcribe
+from openwispr.config import DesktopConfig
 from openwispr.hotkey import Chord
 
 
@@ -55,41 +56,24 @@ def load_transcriber(model_name: str, language: str | None, threads: int | None)
     return t
 
 
-def dictate(
-    model_name: str,
-    language: str | None,
-    threads: int | None,
-    hotkey_spec: str,
-    device: str | None,
-    use_typing: bool,
-    no_sound: bool,
-    fake_mic: str | None,
-) -> None:
+def dictate(config: DesktopConfig) -> None:
     if sys.platform != "win32":
         raise RuntimeError("live dictation is currently implemented for Windows only; `transcribe` and `mic-test` work everywhere")
 
-    chord = Chord.parse(hotkey_spec)
-    transcriber = load_transcriber(model_name, language, threads)
+    transcriber = load_transcriber(config.model_name, config.language, config.threads)
 
     # Warm up once so the first real dictation is as fast as the rest.
     transcriber.transcribe(np.zeros(16_000, dtype=np.float32))
 
     from openwispr import desktop_runtime
 
-    app = desktop_runtime.build_desktop_app(
-        chord=chord,
-        transcriber=transcriber,
-        device=device,
-        use_typing=use_typing,
-        no_sound=no_sound,
-        fake_mic=fake_mic,
-    )
+    app = desktop_runtime.build_desktop_app(config=config, transcriber=transcriber)
 
     if not app.launch():
         return
 
     sys.stderr.write(
-        f"\nReady. Hold {chord.label} and speak; release to insert the text.\n"
+        f"\nReady. Hold {config.chord.label} and speak; release to insert the text.\n"
         "Tap it to dictate hands-free, tap again to stop. Esc cancels.\n"
         "Use the window's Quit button or close the window to quit. Ctrl+C also quits.\n\n"
     )
@@ -292,14 +276,16 @@ def main() -> None:
 
     elif cmd == "run":
         dictate(
-            model_name=args.model,
-            language=args.language,
-            threads=args.threads,
-            hotkey_spec=getattr(args, "hotkey", "ctrl+win"),
-            device=getattr(args, "device", None),
-            use_typing=getattr(args, "type", False),
-            no_sound=getattr(args, "no_sound", False),
-            fake_mic=getattr(args, "fake_mic", None),
+            DesktopConfig(
+                model_name=args.model,
+                language=args.language,
+                threads=args.threads,
+                chord=Chord.parse(getattr(args, "hotkey", "ctrl+win")),
+                device=getattr(args, "device", None),
+                use_typing=getattr(args, "type", False),
+                no_sound=getattr(args, "no_sound", False),
+                fake_mic=getattr(args, "fake_mic", None),
+            )
         )
 
 
