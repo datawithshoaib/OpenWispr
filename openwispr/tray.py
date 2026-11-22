@@ -1,7 +1,8 @@
 """
-Visual indicator for OpenWispr:
+Tray and recording overlay for OpenWispr:
 A sleek, minimal floating wave pill (inspired by Wispr Flow).
 Displays only when recording, with smooth, subtle, flicker-free animated waves.
+The Tray exposes a right-click menu with a Quit command.
 """
 
 from __future__ import annotations
@@ -29,6 +30,13 @@ ICON_SIZE: int = 32
 
 WM_TRAY: int = 0x0400 + 1
 WM_APP_CMD: int = 0x0400 + 2
+WM_NULL: int = 0x0000
+WM_RBUTTONUP: int = 0x0205
+
+MF_STRING: int = 0x0000
+TPM_RIGHTBUTTON: int = 0x0002
+TPM_RETURNCMD: int = 0x0100
+ID_QUIT: int = 1
 
 WM_ERASEBKGND: int = 0x0014
 WM_PAINT: int = 0x000F
@@ -250,6 +258,22 @@ user32.GetMessageW.restype = wintypes.BOOL
 user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
 user32.TranslateMessage.restype = wintypes.BOOL
 
+user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+user32.GetCursorPos.restype = wintypes.BOOL
+user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+user32.SetForegroundWindow.restype = wintypes.BOOL
+user32.CreatePopupMenu.argtypes = []
+user32.CreatePopupMenu.restype = wintypes.HMENU
+user32.AppendMenuW.argtypes = [wintypes.HMENU, wintypes.UINT, ctypes.c_size_t, wintypes.LPCWSTR]
+user32.AppendMenuW.restype = wintypes.BOOL
+user32.TrackPopupMenu.argtypes = [
+    wintypes.HMENU, wintypes.UINT, ctypes.c_int, ctypes.c_int,
+    ctypes.c_int, wintypes.HWND, ctypes.POINTER(RECT),
+]
+user32.TrackPopupMenu.restype = ctypes.c_int
+user32.DestroyMenu.argtypes = [wintypes.HMENU]
+user32.DestroyMenu.restype = wintypes.BOOL
+
 user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
 user32.DispatchMessageW.restype = ctypes.c_longlong
 
@@ -452,7 +476,11 @@ def overlay_wndproc(hwnd: int, msg: int, wparam: int, lparam: int) -> int:
     return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
 
-def ui_thread(cmd_queue: Queue[TrayCommand], hotkey_label: str = "Ctrl+Win") -> None:
+def ui_thread(
+    cmd_queue: Queue[TrayCommand],
+    chord_label: str = "Ctrl+Win",
+    quit_queue: Queue[TrayCommand] | None = None,
+) -> None:
     global _OVERLAY_WNDPROC_KEEP, _DEF_WNDPROC_KEEP, _OVERLAY_FRAME
 
     _DEF_WNDPROC_KEEP = WNDPROC(user32.DefWindowProcW)
@@ -502,7 +530,7 @@ def ui_thread(cmd_queue: Queue[TrayCommand], hotkey_label: str = "Ctrl+Win") -> 
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP
     nid.uCallbackMessage = WM_TRAY
     nid.hIcon = idle_hicon
-    ready_tip = f"OpenWispr – Ready ({hotkey_label} to speak)"[:127]
+    ready_tip = f"OpenWispr – Ready ({chord_label} to speak)"[:127]
     nid.szTip = ready_tip
     shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid))
 
@@ -539,6 +567,30 @@ def ui_thread(cmd_queue: Queue[TrayCommand], hotkey_label: str = "Ctrl+Win") -> 
             elif cmd_val == TrayCommand.Quit.value:
                 quit_flag = True
                 break
+
+        if msg.message == WM_TRAY and (msg.lParam & 0xFFFF) == WM_RBUTTONUP:
+            point = wintypes.POINT()
+            if user32.GetCursorPos(ctypes.byref(point)):
+                user32.SetForegroundWindow(tray_hwnd)
+                menu = user32.CreatePopupMenu()
+                if menu:
+                    user32.AppendMenuW(menu, MF_STRING, ID_QUIT, "Quit")
+                    selected = user32.TrackPopupMenu(
+                        menu,
+                        TPM_RIGHTBUTTON | TPM_RETURNCMD,
+                        point.x,
+                        point.y,
+                        0,
+                        tray_hwnd,
+                        None,
+                    )
+                    user32.DestroyMenu(menu)
+                    user32.PostMessageW(tray_hwnd, WM_NULL, 0, 0)
+                    if selected == ID_QUIT:
+                        if quit_queue is not None:
+                            quit_queue.put(TrayCommand.Quit)
+                        quit_flag = True
+                        break
 
         user32.TranslateMessage(ctypes.byref(msg))
         user32.DispatchMessageW(ctypes.byref(msg))
@@ -589,8 +641,16 @@ class TrayHandle:
         self.queue.put(cmd)
 
 
-def spawn_tray(hotkey_label: str = "Ctrl+Win") -> TrayHandle:
+def spawn_tray(
+    chord_label: str = "Ctrl+Win",
+    quit_queue: Queue[TrayCommand] | None = None,
+) -> TrayHandle:
     q: Queue[TrayCommand] = Queue()
-    t = threading.Thread(target=ui_thread, args=(q, hotkey_label), name="ui-indicator", daemon=True)
+    t = threading.Thread(
+        target=ui_thread,
+        args=(q, chord_label, quit_queue),
+        name="ui-tray",
+        daemon=True,
+    )
     t.start()
     return TrayHandle(q)

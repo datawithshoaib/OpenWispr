@@ -13,7 +13,7 @@ from queue import Empty, Queue
 import threading
 import numpy as np
 
-from openwispr import __version__, audio, model, transcribe
+from openwispr import __version__, audio, autostart, model, transcribe
 from openwispr.hotkey import Action, Chord
 
 if sys.platform == "win32":
@@ -24,6 +24,20 @@ def default_threads() -> int:
     logical = os.cpu_count() or 4
     cores = logical // 2 if logical >= 4 else logical
     return max(1, min(8, cores))
+
+
+def ensure_output_streams() -> None:
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    log_root = Path(local_app_data) if local_app_data else (Path.home() / ".local" / "share")
+    log_dir = log_root / "OpenWispr"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log = (log_dir / "openwispr.log").open("a", encoding="utf-8")
+    if sys.stdout is None:
+        sys.stdout = log
+    if sys.stderr is None:
+        sys.stderr = log
 
 
 def load_transcriber(model_name: str, language: str | None, threads: int | None) -> transcribe.Transcriber:
@@ -98,7 +112,8 @@ def dictate(
     # Warm up once so the first real dictation is as fast as the rest.
     transcriber.transcribe(np.zeros(16_000, dtype=np.float32))
 
-    tray_handle = tray.spawn_tray(chord.label)
+    quit_queue: Queue[tray.TrayCommand] = Queue()
+    tray_handle = tray.spawn_tray(chord.label, quit_queue)
     work_queue: Queue[np.ndarray | None] = Queue()
 
     def worker():
@@ -159,12 +174,19 @@ def dictate(
 
     sys.stderr.write(
         f"\nReady. Hold {chord.label} and speak; release to insert the text.\n"
-        "Tap it to dictate hands-free, tap again to stop. Esc cancels. Ctrl+C quits.\n\n"
+        "Tap it to dictate hands-free, tap again to stop. Esc cancels.\n"
+        "Right-click the Tray and choose Quit. Ctrl+C also quits.\n\n"
     )
     sys.stderr.flush()
 
     try:
         while True:
+            try:
+                if quit_queue.get_nowait() == tray.TrayCommand.Quit:
+                    break
+            except Empty:
+                pass
+
             # Poll with a timeout: on Windows a blocking Queue.get() can't be
             # interrupted, so Ctrl+C would never reach us.
             try:
@@ -205,7 +227,18 @@ def dictate(
         work_queue.put(None)
 
 
-SUBCOMMANDS = ("run", "models", "devices", "download", "transcribe", "mic-test")
+SUBCOMMANDS = (
+    "run",
+    "models",
+    "devices",
+    "download",
+    "transcribe",
+    "mic-test",
+    "install-autostart",
+    "uninstall-autostart",
+    "install-desktop-shortcut",
+    "uninstall-desktop-shortcut",
+)
 
 
 def _add_common_options(p: argparse.ArgumentParser, *, top_level: bool) -> None:
@@ -283,6 +316,12 @@ def build_parser() -> argparse.ArgumentParser:
     mic_parser.add_argument("-d", "--device", default=None, help="Microphone name")
     mic_parser.add_argument("--save", type=Path, default=None, help="Save recording to WAV file")
 
+    # launcher commands
+    subparsers.add_parser("install-autostart", help="Launch OpenWispr at Windows login")
+    subparsers.add_parser("uninstall-autostart", help="Remove Windows login autostart")
+    subparsers.add_parser("install-desktop-shortcut", help="Add an on-demand OpenWispr Desktop shortcut")
+    subparsers.add_parser("uninstall-desktop-shortcut", help="Remove the OpenWispr Desktop shortcut")
+
     return parser
 
 
@@ -298,6 +337,7 @@ def normalize_argv(argv: list[str]) -> list[str]:
 
 
 def main() -> None:
+    ensure_output_streams()
     parser = build_parser()
 
     args = parser.parse_args(normalize_argv(sys.argv[1:]))
@@ -320,6 +360,27 @@ def main() -> None:
     elif cmd == "download":
         p = model.ensure(args.model)
         print(f"Model ready: {p}")
+
+    elif cmd in (
+        "install-autostart",
+        "uninstall-autostart",
+        "install-desktop-shortcut",
+        "uninstall-desktop-shortcut",
+    ):
+        if sys.platform != "win32":
+            raise RuntimeError("launcher shortcuts are Windows-only")
+        if cmd == "install-autostart":
+            print(f"Autostart installed: {autostart.install()}")
+        elif cmd == "uninstall-autostart":
+            print("Autostart removed" if autostart.uninstall() else "Autostart was not installed")
+        elif cmd == "install-desktop-shortcut":
+            print(f"Desktop shortcut installed: {autostart.install_desktop()}")
+        else:
+            print(
+                "Desktop shortcut removed"
+                if autostart.uninstall_desktop()
+                else "Desktop shortcut was not installed"
+            )
 
     elif cmd == "transcribe":
         samples = audio.load_wav(args.wav)

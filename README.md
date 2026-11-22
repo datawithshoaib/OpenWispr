@@ -30,7 +30,7 @@ openwispr
 # or: uv run openwispr
 ```
 
-On first run it downloads the default model (`base.en`, 142 MB) plus a tiny voice-detection
+On first run it downloads the default model (`small.en`, 466 MB) plus a tiny voice-detection
 model (under 1 MB) into `%LOCALAPPDATA%\OpenWispr\models`. After that it works offline.
 
 | Action | What happens |
@@ -39,14 +39,32 @@ model (under 1 MB) into `%LOCALAPPDATA%\OpenWispr\models`. After that it works o
 | Tap **Ctrl+Win** quickly | Hands-free mode: keep talking, tap again to finish |
 | **Esc** while hands-free | Cancel, nothing is inserted |
 | Ctrl+Win + another key (e.g. Ctrl+Win+→) | Treated as a normal shortcut; dictation is cancelled |
+| Right-click the Tray → Quit | Ends the app; autostart stays installed |
 
 You hear a short rising beep when recording starts and a falling one when it stops.
+
+### Start without a terminal
+
+```bash
+openwispr install-desktop-shortcut      # double-click to start hidden
+openwispr uninstall-desktop-shortcut
+```
+
+### Start at login
+
+```bash
+openwispr install-autostart     # add a Startup-folder shortcut (no console)
+openwispr uninstall-autostart   # remove it
+```
+
+Quit from the Tray ends the running app but leaves the shortcuts installed.
 
 ### Options
 
 ```bash
-openwispr --model small.en          # more accurate, slower
+openwispr --model small.en-q5_1     # smaller and faster, less accurate
 openwispr --model tiny.en           # fastest
+openwispr --model large-v3-turbo-q5_0  # best accuracy (multilingual, needs a fast CPU)
 openwispr run --hotkey right-alt    # or f9, ctrl+shift+space, ...
 openwispr run --type                # type keystrokes instead of pasting (clipboard untouched)
 openwispr run --device "USB"        # pick a microphone by name
@@ -74,7 +92,7 @@ clipboard history.
 uv run pytest -v
 ```
 
-Unit tests cover the hotkey state machine (hold, tap/hands-free, cancel, Start-menu
+Unit tests cover the chord state machine (hold, tap/hands-free, cancel, Start-menu
 masking), audio resampling, WAV loading, text cleanup, and model handling.
 
 End-to-end test: this runs the real app and keyboard hook against a throwaway text box,

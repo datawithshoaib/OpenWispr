@@ -17,16 +17,16 @@ BASE_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
 VAD_URL = "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin"
 VAD_FILE = "ggml-silero-v5.1.2.bin"
 
-# The model used when none is specified: good accuracy, fast on any modern CPU.
-DEFAULT_MODEL = "small.en-q5_1"
+# The model used when none is specified: better accuracy, still light on 8 GB RAM.
+DEFAULT_MODEL = "small.en"
 
 # Models known to exist in the whisper.cpp repository, with approximate download size.
 KNOWN_MODELS: list[tuple[str, str]] = [
     ("tiny.en", "75 MB   fastest, lowest accuracy (English)"),
     ("base.en", "142 MB  fast, good accuracy (English)"),
     ("base.en-q5_1", "57 MB   quantized base.en, slightly less accurate"),
-    ("small.en", "466 MB  slower, better accuracy (English)"),
-    ("small.en-q5_1", "181 MB  quantized small.en [default]"),
+    ("small.en", "466 MB  slower, better accuracy (English) [default]"),
+    ("small.en-q5_1", "181 MB  quantized small.en, faster"),
     ("tiny", "75 MB   multilingual"),
     ("base", "142 MB  multilingual"),
     ("small", "466 MB  multilingual"),
