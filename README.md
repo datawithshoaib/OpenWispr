@@ -15,12 +15,9 @@ focus. Speech recognition runs entirely on your machine with a free
 Using [uv](https://github.com/astral-sh/uv):
 
 ```bash
-# Create and activate virtual environment
+# Create the virtual environment and install the locked dependencies
 uv venv
-.venv\Scripts\activate
-
-# Install dependencies and openwispr in editable mode
-uv pip install -e ".[dev]"
+uv sync
 ```
 
 ### Build the per-user installer
@@ -66,15 +63,6 @@ You hear a short rising beep when recording starts and a falling one when it sto
 openwispr install-desktop-shortcut      # double-click to open the app window
 openwispr uninstall-desktop-shortcut
 ```
-
-### Start at login
-
-```bash
-openwispr install-autostart     # add a Startup-folder shortcut (no console)
-openwispr uninstall-autostart   # remove it
-```
-
-Quit from the app window ends the running app but leaves the shortcuts installed.
 
 ### Options
 

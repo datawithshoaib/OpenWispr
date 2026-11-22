@@ -4,12 +4,12 @@ import argparse
 import json
 import os
 import shutil
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from openwispr import autostart, model
+from openwispr.shortcut import create_shortcut, read_shortcut
 
 APP_NAME = "OpenWispr"
 APP_EXE = "OpenWispr.exe"
@@ -27,48 +27,10 @@ class InstallerPaths:
     payload_dir: Path
 
 
-def _quote(value: object) -> str:
-    return "'" + str(value).replace("'", "''") + "'"
-
-
-def create_shortcut(path: Path, target: Path, arguments: str = "", working_directory: Path | None = None) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    working = str(working_directory or target.parent)
-    script = (
-        f"$s = (New-Object -ComObject WScript.Shell).CreateShortcut({_quote(path)}); "
-        f"$s.TargetPath = {_quote(target)}; "
-        f"$s.Arguments = {_quote(arguments)}; "
-        f"$s.WorkingDirectory = {_quote(working)}; $s.Save()"
-    )
-    subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    if not path.exists():
-        raise RuntimeError(f"shortcut was not created: {path}")
-    return path
-
-
-def read_shortcut(path: Path) -> dict:
-    script = (
-        f"$s = (New-Object -ComObject WScript.Shell).CreateShortcut({_quote(path)}); "
-        "[pscustomobject]@{TargetPath=$s.TargetPath;Arguments=$s.Arguments;"
-        "WorkingDirectory=$s.WorkingDirectory} | ConvertTo-Json -Compress"
-    )
-    output = subprocess.check_output(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-        text=True,
-    )
-    return json.loads(output)
-
-
 def _points_at_repository(info: dict) -> bool:
     target = str(info.get("TargetPath", "")).replace("/", "\\").lower()
     arguments = str(info.get("Arguments", "")).lower()
-    working_directory = str(info.get("WorkingDirectory", "")).lower()
-    return "openwispr" in arguments and (".venv\\scripts" in target or "openwispr" in working_directory)
+    return ".venv\\scripts" in target and (not arguments or "openwispr" in arguments)
 
 
 def _remove_legacy_shortcuts(directory: Path) -> None:

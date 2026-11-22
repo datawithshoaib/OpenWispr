@@ -1,6 +1,8 @@
 import pytest
 
 from openwispr import cli, model
+from openwispr.config import DesktopConfig
+from openwispr.hotkey import Chord
 
 
 def parse(argv):
@@ -69,14 +71,10 @@ def test_second_launch_exits_without_ready_message(monkeypatch, capsys):
     monkeypatch.setattr("openwispr.desktop_runtime.build_desktop_app", lambda **kwargs: app)
 
     cli.dictate(
-        model_name="tiny.en",
-        language=None,
-        threads=None,
-        hotkey_spec="ctrl+win",
-        device=None,
-        use_typing=False,
-        no_sound=False,
-        fake_mic=None,
+        DesktopConfig(
+            model_name="tiny.en",
+            chord=Chord.parse("ctrl+win"),
+        )
     )
 
     assert app.ran is False

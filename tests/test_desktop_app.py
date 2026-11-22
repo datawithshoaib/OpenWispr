@@ -1,6 +1,9 @@
 import time
 
+from openwispr import desktop_app as desktop_app_module
+from openwispr.config import DesktopConfig
 from openwispr.desktop_app import DesktopApp, Status
+from openwispr.dictation import Dictation
 from openwispr.hotkey import Action, Chord
 
 
@@ -42,6 +45,9 @@ class FakeEngine:
         self.listening = False
         self.recording = False
         self.busy = False
+        self.dictations = []
+        self.current = None
+        self.pending_dictations = []
         self.on_action = None
         self.on_text = None
 
@@ -50,33 +56,48 @@ class FakeEngine:
         self.on_action = on_action
         self.on_text = on_text
 
-    def start_recording(self):
+    def start_recording(self, dictation):
+        self.dictations.append(dictation)
+        self.current = dictation if self.start_ok else None
         self.recording = self.start_ok
         return self.start_ok
 
     def is_busy(self):
-        return self.recording or self.busy
+        return self.recording or self.busy or bool(self.pending_dictations)
 
     def stop_recording(self):
         self.recording = False
+        dictation = self.current
+        self.current = None
+        if dictation is None:
+            return
         if self.transcript is None:
-            self.on_text("")
+            self.on_text("", dictation)
         elif not self.pending:
             self.busy = True
-            self.on_text(self.transcript)
+            self.on_text(self.transcript, dictation)
             self.busy = False
+        else:
+            self.pending_dictations.append(dictation)
+            self.busy = True
 
     def finish(self, timeout):
         self.finish_timeout = timeout
-        self.recording = False
+        self.stop_recording()
         if self.finish_result and self.transcript is not None:
             self.busy = True
-            self.on_text(self.transcript)
+            for dictation in self.pending_dictations:
+                self.on_text(self.transcript, dictation)
+            self.pending_dictations.clear()
             self.busy = False
         return self.finish_result
 
+    def emit(self, text):
+        self.on_text(text, self.dictations[-1])
+
     def cancel_recording(self):
         self.recording = False
+        self.current = None
 
     def stop_listening(self):
         self.listening = False
@@ -92,8 +113,9 @@ class FakeInserter:
 
 
 class FakeInstanceGuard:
-    def __init__(self, acquired=True):
+    def __init__(self, acquired=True, focus_results=None):
         self.acquired = acquired
+        self.focus_results = focus_results
         self.acquire_count = 0
         self.focus_count = 0
         self.released = False
@@ -104,6 +126,9 @@ class FakeInstanceGuard:
 
     def focus_existing(self):
         self.focus_count += 1
+        if self.focus_results is None:
+            return True
+        return self.focus_results.pop(0) if self.focus_results else True
 
     def release(self):
         self.released = True
@@ -122,13 +147,17 @@ def make_app(
     engine = FakeEngine(transcript, start_ok, pending, finish_result, events)
     inserter = FakeInserter()
     guard = FakeInstanceGuard(acquired)
+    config = DesktopConfig(
+        model_name="tiny.en",
+        chord=Chord.parse("ctrl+win"),
+        debug=debug,
+    )
     app = DesktopApp(
         window=window,
         engine=engine,
         inserter=inserter,
         instance_guard=guard,
-        chord=Chord.parse("ctrl+win"),
-        debug=debug,
+        config=config,
     )
     return app, window, engine, inserter, guard
 
@@ -154,6 +183,25 @@ def test_second_launch_focuses_existing_instance_without_starting_engine():
     assert (engine.listening, window.statuses, window.quit_handler) == (False, [], None)
 
 
+def test_second_launch_retries_focus_until_existing_window_is_ready(monkeypatch):
+    guard = FakeInstanceGuard(acquired=False, focus_results=[False, True])
+    sleeps = []
+    monkeypatch.setattr(desktop_app_module.time, "sleep", lambda seconds: sleeps.append(seconds))
+    app = DesktopApp(
+        window=FakeWindow(),
+        engine=FakeEngine(),
+        inserter=FakeInserter(),
+        instance_guard=guard,
+        config=DesktopConfig(model_name="tiny.en", chord=Chord.parse("ctrl+win")),
+    )
+
+    launched = app.launch()
+
+    assert launched is False
+    assert (guard.focus_count, sleeps) == (2, [desktop_app_module.FOCUS_RETRY_DELAY])
+    assert guard.released is False
+
+
 def test_refused_launch_does_not_build_window_or_engine():
     guard = FakeInstanceGuard(acquired=False)
     built = []
@@ -162,7 +210,7 @@ def test_refused_launch_does_not_build_window_or_engine():
         engine_factory=lambda: built.append("engine") or FakeEngine(),
         inserter=FakeInserter(),
         instance_guard=guard,
-        chord=Chord.parse("ctrl+win"),
+        config=DesktopConfig(model_name="tiny.en", chord=Chord.parse("ctrl+win")),
     )
 
     launched = app.launch()
@@ -202,7 +250,7 @@ def test_repeated_transcript_is_not_inserted_twice():
     engine.on_action(Action.Start)
     engine.on_action(Action.Stop)
 
-    engine.on_text("hello world")
+    engine.emit("hello world")
 
     assert inserter.inserted == ["hello world "]
 
@@ -240,12 +288,91 @@ def test_same_sentence_in_separate_dictations_is_inserted_twice():
     assert inserter.inserted == ["hello world ", "hello world "]
 
 
+class OverlappingEngine:
+    def __init__(self):
+        self.dictations = []
+        self.current = None
+        self.pending = []
+        self.on_action = None
+        self.on_text = None
+
+    def start_listening(self, on_action, on_text):
+        self.on_action = on_action
+        self.on_text = on_text
+
+    def start_recording(self, dictation):
+        self.dictations.append(dictation)
+        self.current = dictation
+        return True
+
+    def is_busy(self):
+        return bool(self.pending)
+
+    def stop_recording(self):
+        self.pending.append(self.current)
+        self.current = None
+
+    def emit(self, text, index):
+        self.on_text(text, self.pending.pop(index))
+
+    def finish(self, timeout):
+        return True
+
+    def cancel_recording(self):
+        self.current = None
+
+    def stop_listening(self):
+        pass
+
+
+def test_overlapping_dictations_each_insert_once_when_first_finishes_late():
+    engine = OverlappingEngine()
+    inserter = FakeInserter()
+    app = DesktopApp(
+        window=FakeWindow(),
+        engine=engine,
+        inserter=inserter,
+        instance_guard=FakeInstanceGuard(),
+        config=DesktopConfig(model_name="tiny.en", chord=Chord.parse("ctrl+win")),
+    )
+    app.launch()
+
+    engine.on_action(Action.Start)
+    engine.on_action(Action.Stop)
+    engine.on_action(Action.Start)
+    engine.on_action(Action.Stop)
+    engine.emit("first words", 0)
+    engine.emit("second words", 0)
+
+    assert inserter.inserted == ["first words ", "second words "]
+
+
+def test_start_of_next_dictation_does_not_discard_pending_result():
+    engine = OverlappingEngine()
+    inserter = FakeInserter()
+    app = DesktopApp(
+        window=FakeWindow(),
+        engine=engine,
+        inserter=inserter,
+        instance_guard=FakeInstanceGuard(),
+        config=DesktopConfig(model_name="tiny.en", chord=Chord.parse("ctrl+win")),
+    )
+    app.launch()
+
+    engine.on_action(Action.Start)
+    engine.on_action(Action.Stop)
+    engine.on_action(Action.Start)
+    engine.emit("earlier words", 0)
+
+    assert inserter.inserted == ["earlier words "]
+
+
 def test_stop_without_a_dictation_does_not_allow_insertion():
     app, _, engine, inserter, _ = make_app()
     app.launch()
 
     engine.on_action(Action.Stop)
-    engine.on_text("stray words")
+    engine.on_text("stray words", Dictation(999))
 
     assert inserter.inserted == []
 
@@ -254,7 +381,7 @@ def test_transcription_without_a_dictation_is_not_inserted():
     app, _, engine, inserter, _ = make_app()
     app.launch()
 
-    engine.on_text("stray words")
+    engine.on_text("stray words", Dictation(999))
 
     assert inserter.inserted == []
 
@@ -283,7 +410,7 @@ def test_one_dictation_inserts_once_even_after_dedup_window(monkeypatch):
 
     engine.on_action(Action.Stop)
     clock[0] += 10
-    engine.on_text("hello world")
+    engine.emit("hello world")
 
     assert inserter.inserted == ["hello world "]
 
