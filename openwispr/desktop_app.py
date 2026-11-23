@@ -3,15 +3,36 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
+from typing import Protocol
 
 from openwispr.output import write_stderr
 from openwispr.status import Status
 
-__all__ = ["DesktopApp", "Status"]
-
 FINISH_TIMEOUT: float = 30.0
 FOCUS_ATTEMPTS = 50
 FOCUS_RETRY_DELAY: float = 0.1
+
+
+class Window(Protocol):
+    def set_quit_handler(self, handler: Callable[[], None]) -> None: ...
+    def show_status(self, status: Status) -> None: ...
+    def run(self) -> None: ...
+    def stay_responsive_until(self, done: threading.Event) -> None: ...
+    def close(self) -> None: ...
+
+
+class DictationModule(Protocol):
+    """What the Desktop App needs from openwispr.dictation.DictationModule."""
+
+    def start(self, on_status: Callable[[Status], None]) -> None: ...
+    def finish(self, timeout: float) -> bool: ...
+    def shut_down(self) -> None: ...
+
+
+class InstanceGuard(Protocol):
+    def acquire(self) -> bool: ...
+    def focus_existing(self) -> bool: ...
+    def release(self) -> None: ...
 
 
 class DesktopApp:
@@ -21,15 +42,15 @@ class DesktopApp:
     def __init__(
         self,
         *,
-        window_factory: Callable[[], object],
-        dictation_module_factory: Callable[[], object],
-        instance_guard: object,
+        window_factory: Callable[[], Window],
+        dictation_module_factory: Callable[[], DictationModule],
+        instance_guard: InstanceGuard,
     ) -> None:
         self._window_factory = window_factory
         self._dictation_module_factory = dictation_module_factory
         self._instance_guard = instance_guard
-        self._window: object | None = None
-        self._dictation_module: object | None = None
+        self._window: Window | None = None
+        self._dictation_module: DictationModule | None = None
         self._status_lock = threading.Lock()
         self._launched = False
         self._quitting = False

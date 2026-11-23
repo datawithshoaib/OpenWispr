@@ -5,6 +5,7 @@ import threading
 import time
 from collections.abc import Callable
 from queue import Empty, Queue
+from typing import Protocol
 
 import numpy as np
 
@@ -21,6 +22,28 @@ def debug_from_environment() -> bool:
     return os.environ.get(DEBUG_ENV, "").strip().lower() in ("1", "true", "yes")
 
 
+class ChordListener(Protocol):
+    def start(self, actions: Queue[Action]) -> None: ...
+    def stop(self) -> None: ...
+
+
+class Microphone(Protocol):
+    def start(self) -> None: ...
+    def stop(self) -> np.ndarray: ...
+
+
+class Transcriber(Protocol):
+    def transcribe(self, samples: np.ndarray) -> str: ...
+
+
+class Inserter(Protocol):
+    def insert(self, text: str) -> None: ...
+
+
+class SoundCues(Protocol):
+    def play(self, cue: Cue) -> None: ...
+
+
 class DictationModule:
     """Owns every Dictation: takes Chord actions from its Chord listener,
     records from the microphone, transcribes on a worker thread, inserts each
@@ -29,11 +52,11 @@ class DictationModule:
     def __init__(
         self,
         *,
-        chord_listener: object,
-        microphone: object,
-        transcriber: object,
-        inserter: object,
-        cues: object,
+        chord_listener: ChordListener,
+        microphone: Microphone,
+        transcriber: Transcriber,
+        inserter: Inserter,
+        cues: SoundCues,
         debug: bool | None = None,
     ) -> None:
         self._chord_listener = chord_listener
@@ -131,28 +154,28 @@ class DictationModule:
             try:
                 self._microphone.start()
             except Exception as e:
-                self._write(f"  microphone error: {e}\n")
+                write_stderr(f"  microphone error: {e}\n")
                 return
             self._recording = True
-            self._report_settled()
+            self._report_status()
         self._play(Cue.Start)
-        self._write("● listening...\n")
+        write_stderr("● listening...\n")
 
     def _stop_recording(self) -> None:
         with self._state:
             if not self._recording:
-                self._report_settled()
+                self._report_status()
                 return
             self._recording = False
             self._pending += 1
-            self._report_settled()
+            self._report_status()
             samples = self._stop_microphone()
         self._play(Cue.Stop)
         if samples is None:
             self._settle_one()
         elif audio.is_silence(samples):
-            self._write("  (too short or silent, ignored)\n")
-            self._log("transcription ignored: no insertion")
+            write_stderr("  (too short or silent, ignored)\n")
+            self._log_not_inserted("silent recording")
             self._settle_one()
         else:
             self._work.put(samples)
@@ -163,10 +186,10 @@ class DictationModule:
             self._recording = False
             if was_recording:
                 self._stop_microphone()
-            self._report_settled()
+            self._report_status()
         if was_recording:
             self._play(Cue.Cancel)
-            self._write("  cancelled\n")
+            write_stderr("  cancelled\n")
 
     def _stop_microphone(self) -> np.ndarray | None:
         """Needs the state lock. Returns the recorded samples, or None if the
@@ -174,14 +197,14 @@ class DictationModule:
         try:
             return self._microphone.stop()
         except Exception as e:
-            self._write(f"  microphone error: {e}\n")
+            write_stderr(f"  microphone error: {e}\n")
             return None
 
     def _play(self, cue: Cue) -> None:
         try:
             self._cues.play(cue)
         except Exception as e:
-            self._write(f"  sound cue error: {e}\n")
+            write_stderr(f"  sound cue error: {e}\n")
 
     def _transcribe_queued(self) -> None:
         while True:
@@ -199,37 +222,41 @@ class DictationModule:
             start = time.time()
             text = self._transcriber.transcribe(samples)
         except Exception as e:
-            self._write(f"  {e}\n")
+            write_stderr(f"  {e}\n")
             return ""
         if not text:
-            self._write("  (no speech detected)\n")
+            write_stderr("  (no speech detected)\n")
         else:
-            self._write(f"  {secs:.1f}s -> {time.time() - start:.2f}s: {text}\n")
+            write_stderr(f"  {secs:.1f}s -> {time.time() - start:.2f}s: {text}\n")
         self._log(f"transcription result: {text}")
         return text
 
     def _insert(self, text: str) -> None:
         if not text:
-            self._log("transcription ignored: no insertion")
+            self._log_not_inserted("empty transcript")
             return
         with self._insert_lock:
             if self._shutting_down.is_set():
-                self._log("transcription ignored after shut down: no insertion")
+                self._log_not_inserted("after shut down")
                 return
             self._log(f"insertion call: {text!r}")
             try:
                 self._inserter.insert(f"{text} ")
             except Exception as e:
-                self._write(f"  insertion failed: {e}\n")
+                write_stderr(f"  insertion failed: {e}\n")
 
     def _settle_one(self) -> None:
         with self._state:
             self._pending -= 1
             self._state.notify_all()
-            self._report_settled()
+            self._report_status()
 
-    def _report_settled(self) -> None:
-        """Needs the state lock: recording beats pending transcriptions, which beat Idle."""
+    def _report_status(self) -> None:
+        """The only place status is reported. Call it with the state lock held,
+        straight after changing the recording flag or the pending count, so each
+        reported status is derived from the state it describes and reports
+        arrive in the order the state changed. Recording beats pending
+        transcriptions, which beat Idle."""
         if self._recording:
             self._on_status(Status.Listening)
         elif self._pending > 0:
@@ -242,10 +269,9 @@ class DictationModule:
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=1.0)
 
+    def _log_not_inserted(self, reason: str) -> None:
+        self._log(f"transcription ignored ({reason}): no insertion")
+
     def _log(self, message: str) -> None:
         if self._debug:
             write_stderr(f"[openwispr] {message}\n")
-
-    @staticmethod
-    def _write(message: str) -> None:
-        write_stderr(message)

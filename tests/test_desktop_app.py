@@ -7,10 +7,11 @@ import pytest
 from openwispr import audio, desktop_runtime, platform_win
 from openwispr import desktop_app as desktop_app_module
 from openwispr.config import DesktopConfig
-from openwispr.desktop_app import DesktopApp, Status
+from openwispr.desktop_app import DesktopApp
 from openwispr.dictation import DictationModule
 from openwispr.hotkey import Action, Chord
 from openwispr.platform_win import Cue
+from openwispr.status import Status
 
 WAIT_TIMEOUT = 5.0
 SPEECH = np.full(16_000, 0.1, dtype=np.float32)
