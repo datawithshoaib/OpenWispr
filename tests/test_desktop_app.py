@@ -81,9 +81,10 @@ class FakeChordListener:
 
 
 class FakeMicrophone:
-    def __init__(self, samples=SPEECH, fails=False):
+    def __init__(self, samples=SPEECH, fails=False, stop_fails=False):
         self.samples = samples
         self.fails = fails
+        self.stop_fails = stop_fails
         self.recording = False
 
     def start(self):
@@ -96,6 +97,8 @@ class FakeMicrophone:
 
     def stop(self):
         self.recording = False
+        if self.stop_fails:
+            raise RuntimeError("device disconnected")
         return self.samples.copy()
 
 
@@ -132,11 +135,14 @@ class FakeInserter:
 
 
 class FakeSoundCues:
-    def __init__(self):
+    def __init__(self, fails=False):
         self.played = []
+        self.fails = fails
 
     def play(self, cue):
         self.played.append(cue)
+        if self.fails:
+            raise RuntimeError("no audio output")
 
 
 class FakeInstanceGuard:
@@ -162,7 +168,7 @@ class FakeInstanceGuard:
 
 
 class Harness:
-    def __init__(self, *, acquired, focus_results, transcriber, microphone, debug):
+    def __init__(self, *, acquired, focus_results, transcriber, microphone, cues, debug):
         self.events = []
         self.built = []
         self.window = FakeWindow(self.events)
@@ -170,7 +176,7 @@ class Harness:
         self.microphone = microphone
         self.transcriber = transcriber
         self.inserter = FakeInserter(self.events)
-        self.cues = FakeSoundCues()
+        self.cues = cues
         self.guard = FakeInstanceGuard(acquired, focus_results)
         self.debug = debug
         self.app = DesktopApp(
@@ -185,7 +191,7 @@ class Harness:
 
     def _build_dictation_module(self):
         self.built.append("dictation module")
-        return DictationModule(
+        self.dictation_module = DictationModule(
             chord_listener=self.chord_listener,
             microphone=self.microphone,
             transcriber=self.transcriber,
@@ -193,6 +199,7 @@ class Harness:
             cues=self.cues,
             debug=self.debug,
         )
+        return self.dictation_module
 
     @property
     def inserted(self):
@@ -212,9 +219,10 @@ class Harness:
         wait_until(lambda: self.window.statuses.count(Status.Listening) > listening)
 
     def stop(self):
-        transcribing = self.window.statuses.count(Status.Transcribing)
+        """Stops and waits for the status the Stop reports."""
+        reported = len(self.window.statuses)
         self.send(Action.Stop)
-        wait_until(lambda: self.window.statuses.count(Status.Transcribing) > transcribing)
+        wait_until(lambda: len(self.window.statuses) > reported)
 
     def wait_for_inserted(self, count):
         wait_until(lambda: len(self.inserted) >= count)
@@ -232,6 +240,7 @@ def make_app():
         focus_results=None,
         transcripts=("hello world",),
         microphone=None,
+        cues=None,
         debug=False,
     ):
         harness = Harness(
@@ -239,6 +248,7 @@ def make_app():
             focus_results=focus_results,
             transcriber=FakeTranscriber(*transcripts),
             microphone=microphone if microphone is not None else FakeMicrophone(),
+            cues=cues if cues is not None else FakeSoundCues(),
             debug=debug,
         )
         harnesses.append(harness)
@@ -359,6 +369,38 @@ def test_overlapping_dictations_each_insert_once_in_spoken_order(make_app):
     assert h.inserted == ["first words ", "second words "]
 
 
+def test_stop_while_earlier_dictation_settles_shows_transcribing_not_listening(make_app):
+    h = make_app(transcripts=["first words", "second words"])
+    h.app.launch()
+    h.transcriber.hold()
+    h.dictate()
+    h.start()
+    module = h.dictation_module
+    stop_recording = module._stop_recording
+
+    def earlier_dictation_settles_before_recording_stops():
+        # Forces the race deterministically: the first Dictation is inserted and
+        # settles (window back at Listening) after the Stop action is taken but
+        # before the second Dictation's recording is stopped.
+        listening = h.window.statuses.count(Status.Listening)
+        h.transcriber.release()
+        h.wait_for_inserted(1)
+        wait_until(lambda: h.window.statuses.count(Status.Listening) > listening)
+        h.transcriber.hold()
+        module._stop_recording = stop_recording
+        stop_recording()
+
+    module._stop_recording = earlier_dictation_settles_before_recording_stops
+    h.send(Action.Stop)
+    wait_until(lambda: h.cues.played.count(Cue.Stop) == 2)
+
+    assert (h.inserted, h.window.status) == (["first words "], Status.Transcribing)
+
+    h.transcriber.release()
+    h.wait_for_inserted(2)
+    h.wait_for_idle()
+
+
 def test_stop_without_a_dictation_inserts_nothing(make_app):
     h = make_app(transcripts=["hello world"])
     h.app.launch()
@@ -366,7 +408,7 @@ def test_stop_without_a_dictation_inserts_nothing(make_app):
     h.stop()
     h.wait_for_idle()
 
-    assert (h.window.statuses, h.inserted, h.cues.played) == ([Status.Idle, Status.Transcribing, Status.Idle], [], [])
+    assert (h.window.statuses, h.inserted, h.cues.played) == ([Status.Idle, Status.Idle], [], [])
 
 
 def test_cancel_ends_dictation_without_insertion(make_app):
@@ -437,6 +479,29 @@ def test_quit_keeps_window_responsive_showing_finishing_until_slow_dictation_is_
     assert (h.chord_listener.listening, h.window.closed, h.guard.released) == (False, True, True)
 
 
+def test_chord_start_while_quit_is_finishing_starts_no_new_dictation(make_app, monkeypatch, capsys):
+    monkeypatch.setattr(desktop_app_module, "FINISH_TIMEOUT", 2.0)
+    h = make_app(transcripts=["last words"], debug=True)
+    h.app.launch()
+    h.start()
+    h.transcriber.hold()
+    logged = []
+
+    def press_chord_while_finishing():
+        wait_until(lambda: Cue.Stop in h.cues.played)
+        h.send(Action.Start)
+        wait_until(lambda: logged.append(capsys.readouterr().err) or "".join(logged).count("chord action Start") == 2)
+        wait_until(lambda: logged.append(capsys.readouterr().err) or "Start ignored" in "".join(logged) or h.microphone.recording)
+        h.transcriber.release()
+
+    h.window.while_responsive = press_chord_while_finishing
+
+    h.window.quit_handler()
+
+    assert (h.microphone.recording, h.cues.played) == (False, [Cue.Start, Cue.Stop])
+    assert h.inserted == ["last words "]
+
+
 def test_ctrl_c_quits_the_same_way_as_closing_the_window(make_app, monkeypatch):
     monkeypatch.setattr(desktop_app_module, "FINISH_TIMEOUT", 2.0)
     h = make_app(transcripts=["last words"])
@@ -491,6 +556,38 @@ def test_microphone_failure_keeps_desktop_app_idle_and_logs_error(make_app, caps
     wait_until(lambda: logged.append(capsys.readouterr().err) or "microphone error" in "".join(logged))
 
     assert (h.window.statuses, h.cues.played) == ([Status.Idle], [])
+
+
+def test_microphone_failing_to_stop_logs_error_and_chord_keeps_working(make_app, capsys):
+    h = make_app(transcripts=["hello world"], microphone=FakeMicrophone(stop_fails=True))
+    h.app.launch()
+    logged = []
+
+    h.start()
+    h.send(Action.Stop)
+    wait_until(lambda: logged.append(capsys.readouterr().err) or "microphone error: device disconnected" in "".join(logged))
+    h.wait_for_idle()
+    h.microphone.stop_fails = False
+    h.dictate()
+    h.wait_for_inserted(1)
+    h.wait_for_idle()
+
+    assert h.inserted == ["hello world "]
+
+
+def test_sound_cue_failure_logs_error_and_dictation_still_inserts(make_app, capsys):
+    h = make_app(transcripts=["hello world"], cues=FakeSoundCues(fails=True))
+    h.app.launch()
+
+    h.dictate()
+    h.wait_for_inserted(1)
+    h.wait_for_idle()
+    h.dictate()
+    h.wait_for_inserted(2)
+    h.wait_for_idle()
+
+    assert h.inserted == ["hello world ", "hello world "]
+    assert "sound cue error: no audio output" in capsys.readouterr().err
 
 
 def test_nothing_is_logged_for_debugging_by_default(make_app, capsys):

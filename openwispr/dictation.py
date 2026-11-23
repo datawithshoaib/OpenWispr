@@ -47,6 +47,7 @@ class DictationModule:
         self._on_status: Callable[[Status], None] = lambda status: None
         self._state = threading.Condition()
         self._recording = False
+        self._finishing = False
         self._pending = 0
         self._stopping = threading.Event()
         self._insert_lock = threading.Lock()
@@ -57,6 +58,8 @@ class DictationModule:
         """Starts listening for Chord actions; every status change goes to on_status."""
         self._on_status = on_status
         self._stopping.clear()
+        with self._state:
+            self._finishing = False
         self._worker_thread = threading.Thread(target=self._transcribe_queued, name="dictation-worker", daemon=True)
         self._worker_thread.start()
         self._chord_listener.start(self._actions)
@@ -65,7 +68,10 @@ class DictationModule:
 
     def finish(self, timeout: float) -> bool:
         """Stops any recording and waits for outstanding transcriptions to be
-        inserted. Returns whether that happened within the timeout."""
+        inserted. Returns whether that happened within the timeout. Once
+        finishing has begun, Chord Starts are ignored."""
+        with self._state:
+            self._finishing = True
         self._stop_recording()
         deadline = time.monotonic() + timeout
         with self._state:
@@ -79,7 +85,13 @@ class DictationModule:
     def stop(self) -> None:
         """Stops listening for Chord actions and ends the background threads.
         Nothing is inserted after this returns, even if a transcription that
-        finish gave up on completes later."""
+        finish gave up on completes later.
+
+        If finish timed out, the worker thread may still be stuck inside a
+        transcription and outlive this call. It is a daemon thread and is
+        deliberately not killed (Python cannot interrupt it safely); whatever
+        it transcribes is discarded because insertion is refused once
+        stopping is set."""
         with self._insert_lock:
             self._stopping.set()
         self._chord_listener.stop()
@@ -101,24 +113,29 @@ class DictationModule:
                 self._start_recording()
             elif action is Action.Stop:
                 self._log("Stop: finishing dictation")
-                self._report(Status.Transcribing)
                 self._stop_recording()
             elif action is Action.Cancel:
                 self._cancel_recording()
+
+    # The microphone is started and stopped while holding the state lock, so
+    # the recording flag and the microphone always change together: a Start
+    # cannot slip in between a Stop (or finish) and the microphone stopping.
 
     def _start_recording(self) -> None:
         with self._state:
             if self._recording:
                 return
-        try:
-            self._microphone.start()
-        except Exception as e:
-            self._write(f"  microphone error: {e}\n")
-            return
-        with self._state:
+            if self._finishing:
+                self._log("Start ignored: Quit is finishing")
+                return
+            try:
+                self._microphone.start()
+            except Exception as e:
+                self._write(f"  microphone error: {e}\n")
+                return
             self._recording = True
             self._report_settled()
-        self._cues.play(Cue.Start)
+        self._play(Cue.Start)
         self._write("● listening...\n")
 
     def _stop_recording(self) -> None:
@@ -128,25 +145,43 @@ class DictationModule:
                 return
             self._recording = False
             self._pending += 1
-        self._cues.play(Cue.Stop)
-        samples = self._microphone.stop()
-        if audio.is_silence(samples):
+            self._report_settled()
+            samples = self._stop_microphone()
+        self._play(Cue.Stop)
+        if samples is None:
+            self._settle_one()
+        elif audio.is_silence(samples):
             self._write("  (too short or silent, ignored)\n")
             self._log("transcription ignored: no insertion")
             self._settle_one()
-            return
-        self._work.put(samples)
+        else:
+            self._work.put(samples)
 
     def _cancel_recording(self) -> None:
         with self._state:
             was_recording = self._recording
             self._recording = False
-        if was_recording:
-            self._microphone.stop()
-            self._cues.play(Cue.Cancel)
-            self._write("  cancelled\n")
-        with self._state:
+            if was_recording:
+                self._stop_microphone()
             self._report_settled()
+        if was_recording:
+            self._play(Cue.Cancel)
+            self._write("  cancelled\n")
+
+    def _stop_microphone(self) -> np.ndarray | None:
+        """Needs the state lock. Returns the recorded samples, or None if the
+        microphone failed."""
+        try:
+            return self._microphone.stop()
+        except Exception as e:
+            self._write(f"  microphone error: {e}\n")
+            return None
+
+    def _play(self, cue: Cue) -> None:
+        try:
+            self._cues.play(cue)
+        except Exception as e:
+            self._write(f"  sound cue error: {e}\n")
 
     def _transcribe_queued(self) -> None:
         while True:
@@ -201,10 +236,6 @@ class DictationModule:
             self._on_status(Status.Transcribing)
         else:
             self._on_status(Status.Idle)
-
-    def _report(self, status: Status) -> None:
-        with self._state:
-            self._on_status(status)
 
     @staticmethod
     def _join(thread: threading.Thread | None) -> None:
