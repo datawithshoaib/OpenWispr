@@ -4,16 +4,22 @@ import tkinter as tk
 from collections.abc import Callable
 
 from openwispr.desktop_app import Status
+from openwispr.wave_indicator import WaveIndicator
 
 
 class TkWindow:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        indicator_factory: Callable[[tk.Misc], object] | None = None,
+    ) -> None:
         self._root = tk.Tk()
         self._root.title("OpenWispr")
         self._root.geometry("200x100")
         self._root.resizable(False, False)
         self._status = tk.StringVar(value=Status.Idle.label)
         self._quit_handler: Callable[[], None] | None = None
+        factory = indicator_factory if indicator_factory is not None else WaveIndicator
+        self._indicator = factory(self._root)
 
         frame = tk.Frame(self._root, padx=18, pady=14)
         frame.pack(fill=tk.BOTH, expand=True)
@@ -29,6 +35,10 @@ class TkWindow:
 
     def show_status(self, status: Status) -> None:
         self._status.set(status.label)
+        if status is Status.Listening:
+            self._indicator.show()
+        else:
+            self._indicator.hide()
 
     def focus(self) -> None:
         try:
@@ -42,6 +52,7 @@ class TkWindow:
         self._root.mainloop()
 
     def close(self) -> None:
+        self._indicator.close()
         try:
             self._root.destroy()
         except tk.TclError:

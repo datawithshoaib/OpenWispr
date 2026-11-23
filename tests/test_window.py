@@ -2,7 +2,22 @@ import openwispr.window as window_module
 from openwispr.desktop_app import Status
 
 
-def test_window_exposes_status_and_quit_only(monkeypatch):
+class FakeIndicator:
+    def __init__(self, parent):
+        self.parent = parent
+        self.calls = []
+
+    def show(self):
+        self.calls.append("show")
+
+    def hide(self):
+        self.calls.append("hide")
+
+    def close(self):
+        self.calls.append("close")
+
+
+def make_view(monkeypatch):
     labels = []
     buttons = []
     status_values = []
@@ -65,9 +80,35 @@ def test_window_exposes_status_and_quit_only(monkeypatch):
     monkeypatch.setattr(window_module.tk, "Button", Button)
     monkeypatch.setattr(window_module.tk, "StringVar", StringVar)
 
-    view = window_module.TkWindow()
+    indicators = []
+
+    def indicator_factory(parent):
+        indicator = FakeIndicator(parent)
+        indicators.append(indicator)
+        return indicator
+
+    view = window_module.TkWindow(indicator_factory=indicator_factory)
+    return view, indicators, labels, buttons, status_values
+
+
+def test_window_exposes_status_quit_and_recording_indicator(monkeypatch):
+    view, indicators, labels, buttons, status_values = make_view(monkeypatch)
+
     view.show_status(Status.Listening)
+    view.show_status(Status.Transcribing)
 
     assert labels == ["Status"]
-    assert status_values == [Status.Idle.label, Status.Listening.label]
+    assert status_values == [Status.Idle.label, Status.Listening.label, Status.Transcribing.label]
     assert buttons == ["Quit"]
+    assert len(indicators) == 1
+    assert indicators[0].parent is view._root
+    assert indicators[0].calls == ["show", "hide"]
+
+
+def test_window_hides_indicator_on_idle_and_closes_it(monkeypatch):
+    view, indicators, _, _, _ = make_view(monkeypatch)
+
+    view.show_status(Status.Idle)
+    view.close()
+
+    assert indicators[0].calls == ["hide", "close"]

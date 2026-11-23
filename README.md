@@ -55,7 +55,9 @@ model (under 1 MB) into `%LOCALAPPDATA%\OpenWispr\models`. After that it works o
 | Ctrl+Win + another key (e.g. Ctrl+Win+→) | Treated as a normal shortcut; dictation is cancelled |
 | Click Quit or close the window | Finishes any Dictation, then ends the app |
 
-You hear a short rising beep when recording starts and a falling one when it stops.
+A small animated wave pill appears at the bottom centre of the screen while a Dictation is
+in progress, so you can tell at a glance whether the microphone is live. You also hear a
+short rising beep when recording starts and a falling one when it stops.
 
 ### Start without a terminal
 
