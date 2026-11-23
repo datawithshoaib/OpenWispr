@@ -12,7 +12,7 @@ from openwispr import audio, platform_win
 from openwispr.config import DesktopConfig
 from openwispr.desktop_app import DesktopApp
 from openwispr.dictation import Dictation
-from openwispr.hotkey import Action
+from openwispr.hotkey import Action, Chord
 from openwispr.output import write_stderr
 from openwispr.instance import SessionInstanceGuard
 from openwispr.window import TkWindow
@@ -34,21 +34,27 @@ class FakeMicSource:
         return self.samples.copy()
 
 
-class AudioSource:
-    def __init__(self, fake_mic: str | Path | None, device: str | None) -> None:
-        if fake_mic:
-            self._mic_source = FakeMicSource(Path(fake_mic))
-        else:
-            self._mic_source = audio.Recorder(device)
+class WindowsChordListener:
+    """Puts Chord actions from the Windows keyboard hook into a queue."""
 
-    def start(self) -> None:
-        self._mic_source.start()
+    def __init__(self, chord: Chord) -> None:
+        self._chord = chord
 
-    def is_recording(self) -> bool:
-        return self._mic_source.is_recording()
+    def start(self, actions: Queue[Action]) -> None:
+        platform_win.spawn_hotkey_listener(self._chord, actions)
 
-    def stop(self) -> np.ndarray:
-        return self._mic_source.stop()
+    def stop(self) -> None:
+        platform_win.stop_hotkey_listener()
+
+
+class WindowsSoundCues:
+    def play(self, cue: platform_win.Cue) -> None:
+        platform_win.play_cue(cue)
+
+
+class SilentSoundCues:
+    def play(self, cue: platform_win.Cue) -> None:
+        pass
 
 
 class TextInserter:
@@ -66,15 +72,15 @@ class HotkeyDictationEngine:
     def __init__(
         self,
         *,
-        chord: Chord,
-        source: AudioSource,
+        chord_listener: object,
+        microphone: object,
         transcriber: object,
-        sound: bool,
+        cues: object,
     ) -> None:
-        self._chord = chord
-        self._source = source
+        self._chord_listener = chord_listener
+        self._source = microphone
         self._transcriber = transcriber
-        self._sound = sound
+        self._cues = cues
         self._action_queue: Queue[Action] = Queue()
         self._work_queue: Queue[tuple[Dictation, np.ndarray] | None] = Queue()
         self._on_action: Callable[[Action], None] | None = None
@@ -99,7 +105,7 @@ class HotkeyDictationEngine:
             target=self._worker, name="dictation-worker", daemon=True
         )
         self._worker_thread.start()
-        platform_win.spawn_hotkey_listener(self._chord, self._action_queue)
+        self._chord_listener.start(self._action_queue)
         self._action_thread = threading.Thread(
             target=self._forward_actions, name="dictation-actions", daemon=True
         )
@@ -167,7 +173,7 @@ class HotkeyDictationEngine:
         self._stopping.set()
         self.stop_recording()
         self._work_queue.put(None)
-        platform_win.stop_hotkey_listener()
+        self._chord_listener.stop()
         self._join(self._action_thread)
         self._join(self._worker_thread)
 
@@ -213,12 +219,17 @@ class HotkeyDictationEngine:
                     self._state.notify_all()
 
     def _cue(self, cue: platform_win.Cue) -> None:
-        if self._sound:
-            platform_win.play_cue(cue)
+        self._cues.play(cue)
 
     @staticmethod
     def _write(message: str) -> None:
         write_stderr(message)
+
+
+def _build_microphone(config: DesktopConfig) -> object:
+    if config.fake_mic:
+        return FakeMicSource(Path(config.fake_mic))
+    return audio.Recorder(config.device)
 
 
 def build_desktop_app(
@@ -230,10 +241,10 @@ def build_desktop_app(
     return DesktopApp(
         window_factory=lambda: TkWindow(),
         engine_factory=lambda: HotkeyDictationEngine(
-            chord=config.chord,
-            source=AudioSource(config.fake_mic, config.device),
+            chord_listener=WindowsChordListener(config.chord),
+            microphone=_build_microphone(config),
             transcriber=transcriber,
-            sound=not config.no_sound,
+            cues=SilentSoundCues() if config.no_sound else WindowsSoundCues(),
         ),
         inserter=TextInserter(config.use_typing),
         instance_guard=instance_guard if instance_guard is not None else SessionInstanceGuard(),
