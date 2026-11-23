@@ -466,6 +466,22 @@ def test_finish_timeout_logs_and_still_quits(make_app, monkeypatch, capsys):
     assert "timed out after 0.1s" in capsys.readouterr().err
 
 
+def test_transcription_finishing_after_quit_gave_up_is_not_inserted(make_app, monkeypatch, capsys):
+    monkeypatch.setattr(desktop_app_module, "FINISH_TIMEOUT", 0.1)
+    h = make_app(transcripts=["too late"], debug=True)
+    h.app.launch()
+    h.start()
+    h.transcriber.hold()
+    h.window.quit_handler()
+    logged = []
+
+    h.transcriber.release()
+    wait_until(lambda: logged.append(capsys.readouterr().err) or "transcription result: too late" in "".join(logged))
+    wait_until(lambda: logged.append(capsys.readouterr().err) or "no insertion" in "".join(logged) or h.inserted)
+
+    assert h.inserted == []
+
+
 def test_microphone_failure_keeps_desktop_app_idle_and_logs_error(make_app, capsys):
     h = make_app(microphone=FakeMicrophone(fails=True))
     h.app.launch()
