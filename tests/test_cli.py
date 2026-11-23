@@ -1,6 +1,8 @@
 import pytest
 
 from openwispr import cli, model
+from openwispr.config import DesktopConfig
+from openwispr.hotkey import Chord
 
 
 def parse(argv):
@@ -51,6 +53,32 @@ def test_ensure_output_streams_without_console(monkeypatch, tmp_path):
 
     log = tmp_path / "OpenWispr" / "openwispr.log"
     assert "hello" in log.read_text(encoding="utf-8")
+
+
+def test_second_launch_exits_without_ready_message(monkeypatch, capsys):
+    class RejectedApp:
+        def __init__(self):
+            self.ran = False
+
+        def launch(self):
+            return False
+
+        def run(self):
+            self.ran = True
+
+    app = RejectedApp()
+    monkeypatch.setattr(cli, "load_transcriber", lambda *args: type("T", (), {"transcribe": lambda self, samples: ""})())
+    monkeypatch.setattr("openwispr.desktop_runtime.build_desktop_app", lambda **kwargs: app)
+
+    cli.dictate(
+        DesktopConfig(
+            model_name="tiny.en",
+            chord=Chord.parse("ctrl+win"),
+        )
+    )
+
+    assert app.ran is False
+    assert "Ready" not in capsys.readouterr().err
 
 
 def test_version(capsys):

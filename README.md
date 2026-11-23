@@ -15,12 +15,26 @@ focus. Speech recognition runs entirely on your machine with a free
 Using [uv](https://github.com/astral-sh/uv):
 
 ```bash
-# Create and activate virtual environment
+# Create the virtual environment and install the locked dependencies
 uv venv
-.venv\Scripts\activate
+uv sync
+```
 
-# Install dependencies and openwispr in editable mode
-uv pip install -e ".[dev]"
+### Build the per-user installer
+
+```bash
+uv run python build_installer.py
+```
+
+The build downloads the default Dictation model and the voice-detection model if needed,
+bundles them with the windowed app, and writes `dist\OpenWisprInstaller.exe`. Run that
+`.exe` to install into your user profile and add a Start Menu entry only. There is no
+administrator prompt, Desktop shortcut, or login entry. Run it again with `uninstall`
+to remove the app, its bundled models, the Start Menu entry, and legacy repository
+shortcuts:
+
+```bash
+dist\OpenWisprInstaller.exe uninstall
 ```
 
 ## Use it
@@ -39,25 +53,18 @@ model (under 1 MB) into `%LOCALAPPDATA%\OpenWispr\models`. After that it works o
 | Tap **Ctrl+Win** quickly | Hands-free mode: keep talking, tap again to finish |
 | **Esc** while hands-free | Cancel, nothing is inserted |
 | Ctrl+Win + another key (e.g. Ctrl+Win+→) | Treated as a normal shortcut; dictation is cancelled |
-| Right-click the Tray → Quit | Ends the app; autostart stays installed |
+| Click Quit or close the window | Finishes any Dictation, then ends the app |
 
-You hear a short rising beep when recording starts and a falling one when it stops.
+A small animated wave pill appears at the bottom centre of the screen while a Dictation is
+in progress, so you can tell at a glance whether the microphone is live. You also hear a
+short rising beep when recording starts and a falling one when it stops.
 
 ### Start without a terminal
 
 ```bash
-openwispr install-desktop-shortcut      # double-click to start hidden
+openwispr install-desktop-shortcut      # double-click to open the app window
 openwispr uninstall-desktop-shortcut
 ```
-
-### Start at login
-
-```bash
-openwispr install-autostart     # add a Startup-folder shortcut (no console)
-openwispr uninstall-autostart   # remove it
-```
-
-Quit from the Tray ends the running app but leaves the shortcuts installed.
 
 ### Options
 

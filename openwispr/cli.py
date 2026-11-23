@@ -9,15 +9,11 @@ import os
 import sys
 import time
 from pathlib import Path
-from queue import Empty, Queue
-import threading
 import numpy as np
 
 from openwispr import __version__, audio, autostart, model, transcribe
-from openwispr.hotkey import Action, Chord
-
-if sys.platform == "win32":
-    from openwispr import platform_win, tray
+from openwispr.config import DesktopConfig
+from openwispr.hotkey import Chord
 
 
 def default_threads() -> int:
@@ -60,171 +56,30 @@ def load_transcriber(model_name: str, language: str | None, threads: int | None)
     return t
 
 
-class FakeMicSource:
-    def __init__(self, path: Path) -> None:
-        self.samples = audio.load_wav(path)
-        self.recording = False
-
-    def start(self) -> None:
-        self.recording = True
-
-    def is_recording(self) -> bool:
-        return self.recording
-
-    def stop(self) -> np.ndarray:
-        self.recording = False
-        return self.samples.copy()
-
-
-class AudioSource:
-    def __init__(self, fake_mic: str | Path | None, device: str | None) -> None:
-        if fake_mic:
-            self.inner = FakeMicSource(Path(fake_mic))
-        else:
-            self.inner = audio.Recorder(device)
-
-    def start(self) -> None:
-        self.inner.start()
-
-    def is_recording(self) -> bool:
-        return self.inner.is_recording()
-
-    def stop(self) -> np.ndarray:
-        return self.inner.stop()
-
-
-def dictate(
-    model_name: str,
-    language: str | None,
-    threads: int | None,
-    hotkey_spec: str,
-    device: str | None,
-    use_typing: bool,
-    no_sound: bool,
-    fake_mic: str | None,
-) -> None:
+def dictate(config: DesktopConfig) -> None:
     if sys.platform != "win32":
         raise RuntimeError("live dictation is currently implemented for Windows only; `transcribe` and `mic-test` work everywhere")
 
-    chord = Chord.parse(hotkey_spec)
-    transcriber = load_transcriber(model_name, language, threads)
+    transcriber = load_transcriber(config.model_name, config.language, config.threads)
 
     # Warm up once so the first real dictation is as fast as the rest.
     transcriber.transcribe(np.zeros(16_000, dtype=np.float32))
 
-    quit_queue: Queue[tray.TrayCommand] = Queue()
-    tray_handle = tray.spawn_tray(chord.label, quit_queue)
-    work_queue: Queue[np.ndarray | None] = Queue()
+    from openwispr import desktop_runtime
 
-    def worker():
-        last_text = ""
-        last_time = 0.0
-        dedup_window = 5.0
+    app = desktop_runtime.build_desktop_app(config=config, transcriber=transcriber)
 
-        while True:
-            samples = work_queue.get()
-            if samples is None:
-                break
-            secs = len(samples) / audio.WHISPER_RATE
-            start = time.time()
-            try:
-                text = transcriber.transcribe(samples)
-                if not text:
-                    sys.stderr.write("  (no speech detected)\n")
-                    sys.stderr.flush()
-                else:
-                    duration = time.time() - start
-                    sys.stderr.write(f"  {secs:.1f}s -> {duration:.2f}s: {text}\n")
-                    sys.stderr.flush()
-
-                    now = time.time()
-                    if text == last_text and (now - last_time) < dedup_window:
-                        sys.stderr.write("  (duplicate suppressed)\n")
-                        sys.stderr.flush()
-                        continue
-                    last_text = text
-                    last_time = now
-
-                    # Separate consecutive dictations with a space
-                    text_with_space = f"{text} "
-                    try:
-                        if use_typing:
-                            platform_win.type_text(text_with_space)
-                        else:
-                            platform_win.paste_text(text_with_space)
-                    except Exception as e:
-                        sys.stderr.write(f"  could not insert text: {e}\n")
-                        sys.stderr.flush()
-            except Exception as e:
-                sys.stderr.write(f"  {e}\n")
-                sys.stderr.flush()
-
-    worker_thread = threading.Thread(target=worker, daemon=True)
-    worker_thread.start()
-
-    action_queue: Queue[Action] = Queue()
-    platform_win.spawn_hotkey_listener(chord, action_queue)
-
-    source = AudioSource(fake_mic, device)
-    sound = not no_sound
-
-    def cue(c: platform_win.Cue) -> None:
-        if sound:
-            platform_win.play_cue(c)
+    if not app.launch():
+        return
 
     sys.stderr.write(
-        f"\nReady. Hold {chord.label} and speak; release to insert the text.\n"
+        f"\nReady. Hold {config.chord.label} and speak; release to insert the text.\n"
         "Tap it to dictate hands-free, tap again to stop. Esc cancels.\n"
-        "Right-click the Tray and choose Quit. Ctrl+C also quits.\n\n"
+        "Use the window's Quit button or close the window to quit. Ctrl+C also quits.\n\n"
     )
     sys.stderr.flush()
 
-    try:
-        while True:
-            try:
-                if quit_queue.get_nowait() == tray.TrayCommand.Quit:
-                    break
-            except Empty:
-                pass
-
-            # Poll with a timeout: on Windows a blocking Queue.get() can't be
-            # interrupted, so Ctrl+C would never reach us.
-            try:
-                action = action_queue.get(timeout=0.2)
-            except Empty:
-                continue
-            if action == Action.Start:
-                try:
-                    source.start()
-                    cue(platform_win.Cue.Start)
-                    tray_handle.send(tray.TrayCommand.StartListening)
-                    sys.stderr.write("● listening...\n")
-                    sys.stderr.flush()
-                except Exception as e:
-                    sys.stderr.write(f"  microphone error: {e}\n")
-                    sys.stderr.flush()
-            elif action == Action.Stop:
-                if source.is_recording():
-                    cue(platform_win.Cue.Stop)
-                    tray_handle.send(tray.TrayCommand.StopListening)
-                    samples = source.stop()
-                    if audio.is_silence(samples):
-                        sys.stderr.write("  (too short or silent, ignored)\n")
-                        sys.stderr.flush()
-                    else:
-                        work_queue.put(samples)
-            elif action == Action.Cancel:
-                if source.is_recording():
-                    source.stop()
-                    tray_handle.send(tray.TrayCommand.StopListening)
-                    cue(platform_win.Cue.Cancel)
-                    sys.stderr.write("  cancelled\n")
-                    sys.stderr.flush()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        tray_handle.send(tray.TrayCommand.Quit)
-        work_queue.put(None)
+    app.run()
 
 
 SUBCOMMANDS = (
@@ -421,14 +276,16 @@ def main() -> None:
 
     elif cmd == "run":
         dictate(
-            model_name=args.model,
-            language=args.language,
-            threads=args.threads,
-            hotkey_spec=getattr(args, "hotkey", "ctrl+win"),
-            device=getattr(args, "device", None),
-            use_typing=getattr(args, "type", False),
-            no_sound=getattr(args, "no_sound", False),
-            fake_mic=getattr(args, "fake_mic", None),
+            DesktopConfig(
+                model_name=args.model,
+                language=args.language,
+                threads=args.threads,
+                chord=Chord.parse(getattr(args, "hotkey", "ctrl+win")),
+                device=getattr(args, "device", None),
+                use_typing=getattr(args, "type", False),
+                no_sound=getattr(args, "no_sound", False),
+                fake_mic=getattr(args, "fake_mic", None),
+            )
         )
 
 

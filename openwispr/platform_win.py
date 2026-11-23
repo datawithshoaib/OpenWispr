@@ -22,6 +22,7 @@ VK_MASK: int = 0xE8
 WH_KEYBOARD_LL: int = 13
 HC_ACTION: int = 0
 
+WM_QUIT: int = 0x0012
 WM_KEYDOWN: int = 0x0100
 WM_KEYUP: int = 0x0101
 WM_SYSKEYDOWN: int = 0x0104
@@ -149,6 +150,14 @@ user32.GetMessageW.argtypes = [
 ]
 user32.GetMessageW.restype = wintypes.BOOL
 
+user32.PostThreadMessageW.argtypes = [
+    wintypes.DWORD,
+    wintypes.UINT,
+    wintypes.WPARAM,
+    wintypes.LPARAM,
+]
+user32.PostThreadMessageW.restype = wintypes.BOOL
+
 user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
 user32.TranslateMessage.restype = wintypes.BOOL
 
@@ -163,6 +172,7 @@ winmm.PlaySoundW.restype = wintypes.BOOL
 # Keep hook proc reference alive to prevent GC
 _GLOBAL_HOOK_PROC: HOOKPROC | None = None
 _HOOK_HANDLE: wintypes.HHOOK | None = None
+_HOOK_THREAD: threading.Thread | None = None
 
 
 def is_pressed(vk: int) -> bool:
@@ -300,7 +310,7 @@ def spawn_hotkey_listener(chord: Chord, action_queue: Queue[Action]) -> None:
     Installs a low-level keyboard hook on a dedicated thread and puts hotkey
     actions into action_queue.
     """
-    global _GLOBAL_HOOK_PROC, _HOOK_HANDLE
+    global _GLOBAL_HOOK_PROC, _HOOK_HANDLE, _HOOK_THREAD
 
     ready_event = threading.Event()
     machine = Machine(chord)
@@ -340,11 +350,28 @@ def spawn_hotkey_listener(chord: Chord, action_queue: Queue[Action]) -> None:
             user32.DispatchMessageW(ctypes.byref(msg))
 
     th = threading.Thread(target=listener_thread, name="hotkey", daemon=True)
+    _HOOK_THREAD = th
     th.start()
 
     ready_event.wait(timeout=5.0)
     if not _HOOK_HANDLE:
         raise RuntimeError("could not install the keyboard hook")
+
+
+def stop_hotkey_listener() -> None:
+    global _GLOBAL_HOOK_PROC, _HOOK_HANDLE, _HOOK_THREAD
+
+    handle = _HOOK_HANDLE
+    _HOOK_HANDLE = None
+    if handle:
+        user32.UnhookWindowsHookEx(handle)
+
+    thread = _HOOK_THREAD
+    if thread is not None and thread.is_alive():
+        user32.PostThreadMessageW(thread.ident, WM_QUIT, 0, 0)
+        thread.join(timeout=2.0)
+    _HOOK_THREAD = None
+    _GLOBAL_HOOK_PROC = None
 
 
 class Cue(Enum):
