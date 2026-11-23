@@ -8,7 +8,7 @@ from openwispr import audio, desktop_runtime, platform_win
 from openwispr import desktop_app as desktop_app_module
 from openwispr.config import DesktopConfig
 from openwispr.desktop_app import DesktopApp, Status
-from openwispr.desktop_runtime import HotkeyDictationEngine
+from openwispr.dictation import DictationModule
 from openwispr.hotkey import Action, Chord
 from openwispr.platform_win import Cue
 
@@ -162,25 +162,26 @@ class Harness:
         self.inserter = FakeInserter()
         self.cues = FakeSoundCues()
         self.guard = FakeInstanceGuard(acquired, focus_results)
+        self.debug = debug
         self.app = DesktopApp(
             window_factory=self._build_window,
-            engine_factory=self._build_engine,
-            inserter=self.inserter,
+            dictation_factory=self._build_dictation_module,
             instance_guard=self.guard,
-            config=DesktopConfig(model_name="tiny.en", chord=Chord.parse("ctrl+win"), debug=debug),
         )
 
     def _build_window(self):
         self.built.append("window")
         return self.window
 
-    def _build_engine(self):
-        self.built.append("engine")
-        return HotkeyDictationEngine(
+    def _build_dictation_module(self):
+        self.built.append("dictation module")
+        return DictationModule(
             chord_listener=self.chord_listener,
             microphone=self.microphone,
             transcriber=self.transcriber,
+            inserter=self.inserter,
             cues=self.cues,
+            debug=self.debug,
         )
 
     @property

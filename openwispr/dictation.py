@@ -1,8 +1,212 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+import threading
+import time
+from collections.abc import Callable
+from queue import Empty, Queue
+
+import numpy as np
+
+from openwispr import audio
+from openwispr.hotkey import Action
+from openwispr.output import write_stderr
+from openwispr.platform_win import Cue
+from openwispr.status import Status
+
+DEBUG_ENV = "OPENWISPR_DEBUG"
 
 
-@dataclass(frozen=True)
-class Dictation:
-    id: int
+def debug_from_environment() -> bool:
+    return os.environ.get(DEBUG_ENV, "").strip().lower() in ("1", "true", "yes")
+
+
+class DictationModule:
+    """Owns every Dictation: takes Chord actions from its Chord listener,
+    records from the microphone, transcribes on a worker thread, inserts each
+    Dictation's words exactly once and reports Listening / Transcribing / Idle."""
+
+    def __init__(
+        self,
+        *,
+        chord_listener: object,
+        microphone: object,
+        transcriber: object,
+        inserter: object,
+        cues: object,
+        debug: bool | None = None,
+    ) -> None:
+        self._chord_listener = chord_listener
+        self._microphone = microphone
+        self._transcriber = transcriber
+        self._inserter = inserter
+        self._cues = cues
+        self._debug = debug if debug is not None else debug_from_environment()
+        self._actions: Queue[Action] = Queue()
+        self._work: Queue[np.ndarray | None] = Queue()
+        self._on_status: Callable[[Status], None] = lambda status: None
+        self._state = threading.Condition()
+        self._recording = False
+        self._pending = 0
+        self._stopping = threading.Event()
+        self._action_thread: threading.Thread | None = None
+        self._worker_thread: threading.Thread | None = None
+
+    def start(self, on_status: Callable[[Status], None]) -> None:
+        """Starts listening for Chord actions; every status change goes to on_status."""
+        self._on_status = on_status
+        self._stopping.clear()
+        self._worker_thread = threading.Thread(target=self._transcribe_queued, name="dictation-worker", daemon=True)
+        self._worker_thread.start()
+        self._chord_listener.start(self._actions)
+        self._action_thread = threading.Thread(target=self._handle_actions, name="dictation-actions", daemon=True)
+        self._action_thread.start()
+
+    def finish(self, timeout: float) -> bool:
+        """Stops any recording and waits for outstanding transcriptions to be
+        inserted. Returns whether that happened within the timeout."""
+        self._stop_recording()
+        deadline = time.monotonic() + timeout
+        with self._state:
+            while self._pending > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._state.wait(remaining)
+        return True
+
+    def stop(self) -> None:
+        """Stops listening for Chord actions and ends the background threads."""
+        self._stopping.set()
+        self._chord_listener.stop()
+        self._join(self._action_thread)
+        self._stop_recording()
+        self._work.put(None)
+        self._join(self._worker_thread)
+
+    def _handle_actions(self) -> None:
+        while not self._stopping.is_set():
+            try:
+                action = self._actions.get(timeout=0.2)
+            except Empty:
+                continue
+            if self._stopping.is_set():
+                return
+            self._log(f"chord action {action.name}")
+            if action is Action.Start:
+                self._start_recording()
+            elif action is Action.Stop:
+                self._log("Stop: finishing dictation")
+                self._report(Status.Transcribing)
+                self._stop_recording()
+            elif action is Action.Cancel:
+                self._cancel_recording()
+
+    def _start_recording(self) -> None:
+        with self._state:
+            if self._recording:
+                return
+        try:
+            self._microphone.start()
+        except Exception as e:
+            self._write(f"  microphone error: {e}\n")
+            return
+        with self._state:
+            self._recording = True
+            self._report_settled()
+        self._cues.play(Cue.Start)
+        self._write("● listening...\n")
+
+    def _stop_recording(self) -> None:
+        with self._state:
+            if not self._recording:
+                self._report_settled()
+                return
+            self._recording = False
+            self._pending += 1
+        self._cues.play(Cue.Stop)
+        samples = self._microphone.stop()
+        if audio.is_silence(samples):
+            self._write("  (too short or silent, ignored)\n")
+            self._log("transcription ignored: no insertion")
+            self._settle_one()
+            return
+        self._work.put(samples)
+
+    def _cancel_recording(self) -> None:
+        with self._state:
+            was_recording = self._recording
+            self._recording = False
+        if was_recording:
+            self._microphone.stop()
+            self._cues.play(Cue.Cancel)
+            self._write("  cancelled\n")
+        with self._state:
+            self._report_settled()
+
+    def _transcribe_queued(self) -> None:
+        while True:
+            samples = self._work.get()
+            if samples is None:
+                return
+            try:
+                self._insert(self._transcribe(samples))
+            finally:
+                self._settle_one()
+
+    def _transcribe(self, samples: np.ndarray) -> str:
+        try:
+            secs = len(samples) / audio.WHISPER_RATE
+            start = time.time()
+            text = self._transcriber.transcribe(samples)
+        except Exception as e:
+            self._write(f"  {e}\n")
+            return ""
+        if not text:
+            self._write("  (no speech detected)\n")
+        else:
+            self._write(f"  {secs:.1f}s -> {time.time() - start:.2f}s: {text}\n")
+        self._log(f"transcription result: {text}")
+        return text
+
+    def _insert(self, text: str) -> None:
+        if not text:
+            self._log("transcription ignored: no insertion")
+            return
+        self._log(f"insertion call: {text!r}")
+        try:
+            self._inserter.insert(f"{text} ")
+        except Exception as e:
+            self._write(f"  insertion failed: {e}\n")
+
+    def _settle_one(self) -> None:
+        with self._state:
+            self._pending -= 1
+            self._state.notify_all()
+            self._report_settled()
+
+    def _report_settled(self) -> None:
+        """Needs the state lock: recording beats pending transcriptions, which beat Idle."""
+        if self._recording:
+            self._on_status(Status.Listening)
+        elif self._pending > 0:
+            self._on_status(Status.Transcribing)
+        else:
+            self._on_status(Status.Idle)
+
+    def _report(self, status: Status) -> None:
+        with self._state:
+            self._on_status(status)
+
+    @staticmethod
+    def _join(thread: threading.Thread | None) -> None:
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=1.0)
+
+    def _log(self, message: str) -> None:
+        if self._debug:
+            write_stderr(f"[openwispr] {message}\n")
+
+    @staticmethod
+    def _write(message: str) -> None:
+        write_stderr(message)

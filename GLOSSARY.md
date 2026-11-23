@@ -20,6 +20,10 @@ _Avoid_: process, session, duplicate window
 A single recording session whose recognized words are inserted into the focused application.
 _Avoid_: recording session, transcription job
 
+**Dictation module**:
+The part of the Desktop App that handles every Dictation: it reacts to the Chord, records, transcribes, inserts each Dictation's words exactly once and works out the status shown in the window.
+_Avoid_: engine, dictation engine, recorder
+
 **Chord**:
 The configured key combination that starts and stops dictation; holding it dictates until release, while tapping it switches to hands-free.
 _Avoid_: hotkey, shortcut, keybind

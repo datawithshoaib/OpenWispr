@@ -4,7 +4,7 @@ import queue
 import tkinter as tk
 from collections.abc import Callable
 
-from openwispr.desktop_app import Status
+from openwispr.status import Status
 from openwispr.wave_indicator import WaveIndicator
 
 STATUS_POLL_MS = 30
