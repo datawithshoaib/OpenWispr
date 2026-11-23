@@ -49,6 +49,7 @@ class DictationModule:
         self._recording = False
         self._pending = 0
         self._stopping = threading.Event()
+        self._insert_lock = threading.Lock()
         self._action_thread: threading.Thread | None = None
         self._worker_thread: threading.Thread | None = None
 
@@ -76,8 +77,11 @@ class DictationModule:
         return True
 
     def stop(self) -> None:
-        """Stops listening for Chord actions and ends the background threads."""
-        self._stopping.set()
+        """Stops listening for Chord actions and ends the background threads.
+        Nothing is inserted after this returns, even if a transcription that
+        finish gave up on completes later."""
+        with self._insert_lock:
+            self._stopping.set()
         self._chord_listener.stop()
         self._join(self._action_thread)
         self._stop_recording()
@@ -173,11 +177,15 @@ class DictationModule:
         if not text:
             self._log("transcription ignored: no insertion")
             return
-        self._log(f"insertion call: {text!r}")
-        try:
-            self._inserter.insert(f"{text} ")
-        except Exception as e:
-            self._write(f"  insertion failed: {e}\n")
+        with self._insert_lock:
+            if self._stopping.is_set():
+                self._log("transcription ignored after stop: no insertion")
+                return
+            self._log(f"insertion call: {text!r}")
+            try:
+                self._inserter.insert(f"{text} ")
+            except Exception as e:
+                self._write(f"  insertion failed: {e}\n")
 
     def _settle_one(self) -> None:
         with self._state:

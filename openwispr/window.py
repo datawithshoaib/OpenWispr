@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+import threading
 import tkinter as tk
 from collections.abc import Callable
 
@@ -71,6 +72,16 @@ class TkWindow:
 
     def run(self) -> None:
         self._root.mainloop()
+
+    def stay_responsive_until(self, done: threading.Event) -> None:
+        """Keeps the Tk event loop running (statuses applied, window redrawn)
+        until done is set. Call on the Tk thread."""
+        while not done.is_set():
+            try:
+                self._root.update()
+            except tk.TclError:
+                return
+            done.wait(STATUS_POLL_MS / 1000)
 
     def close(self) -> None:
         self._closed = True
