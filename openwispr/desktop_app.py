@@ -1,56 +1,57 @@
 from __future__ import annotations
 
-import os
+import threading
 import time
 from collections.abc import Callable
-from enum import Enum, auto
+from typing import Protocol
 
-from openwispr.config import DesktopConfig
-from openwispr.dictation import Dictation
-from openwispr.hotkey import Action
 from openwispr.output import write_stderr
+from openwispr.status import Status
 
-DEBUG_ENV = "OPENWISPR_DEBUG"
 FINISH_TIMEOUT: float = 30.0
 FOCUS_ATTEMPTS = 50
 FOCUS_RETRY_DELAY: float = 0.1
 
 
-class Status(Enum):
-    Idle = auto()
-    Listening = auto()
-    Transcribing = auto()
-    Finishing = auto()
+class Window(Protocol):
+    def set_quit_handler(self, handler: Callable[[], None]) -> None: ...
+    def show_status(self, status: Status) -> None: ...
+    def run(self) -> None: ...
+    def stay_responsive_until(self, done: threading.Event) -> None: ...
+    def close(self) -> None: ...
 
-    @property
-    def label(self) -> str:
-        return self.name
+
+class DictationModule(Protocol):
+    """What the Desktop App needs from openwispr.dictation.DictationModule."""
+
+    def start(self, on_status: Callable[[Status], None]) -> None: ...
+    def finish(self, timeout: float) -> bool: ...
+    def shut_down(self) -> None: ...
+
+
+class InstanceGuard(Protocol):
+    def acquire(self) -> bool: ...
+    def focus_existing(self) -> bool: ...
+    def release(self) -> None: ...
 
 
 class DesktopApp:
+    """Launch (one Instance), run, Quit, and showing the Dictation module's
+    status in the window."""
+
     def __init__(
         self,
         *,
-        window: object | None = None,
-        engine: object | None = None,
-        inserter: object,
-        instance_guard: object,
-        config: DesktopConfig,
-        window_factory: Callable[[], object] | None = None,
-        engine_factory: Callable[[], object] | None = None,
+        window_factory: Callable[[], Window],
+        dictation_module_factory: Callable[[], DictationModule],
+        instance_guard: InstanceGuard,
     ) -> None:
-        self._config = config
-        self._debug = config.debug if config.debug is not None else os.environ.get(DEBUG_ENV, "").strip().lower() in ("1", "true", "yes")
-        self._window_factory = window_factory if window_factory is not None else lambda: window
-        self._engine_factory = engine_factory if engine_factory is not None else lambda: engine
-        self._window: object | None = None
-        self._engine: object | None = None
-        self._inserter = inserter
+        self._window_factory = window_factory
+        self._dictation_module_factory = dictation_module_factory
         self._instance_guard = instance_guard
-        self._next_dictation_id = 0
-        self._active_dictation: Dictation | None = None
-        self._pending_dictations: set[Dictation] = set()
-        self._seen_dictations: set[Dictation] = set()
+        self._window: Window | None = None
+        self._dictation_module: DictationModule | None = None
+        self._status_lock = threading.Lock()
         self._launched = False
         self._quitting = False
 
@@ -60,10 +61,10 @@ class DesktopApp:
             return False
         self._launched = True
         self._window = self._window_factory()
-        self._engine = self._engine_factory()
+        self._dictation_module = self._dictation_module_factory()
         self._window.set_quit_handler(self.quit)
         self._window.show_status(Status.Idle)
-        self._engine.start_listening(self._handle_action, self._handle_text)
+        self._dictation_module.start(self._show_status)
         return True
 
     def _focus_existing_with_retry(self) -> None:
@@ -83,75 +84,32 @@ class DesktopApp:
             self.quit()
 
     def quit(self) -> None:
-        if not self._launched or self._quitting:
-            return
-        self._quitting = True
-        if self._active_dictation is not None:
-            self._pending_dictations.add(self._active_dictation)
-            self._active_dictation = None
-        if self._engine.is_busy():
+        with self._status_lock:
+            if not self._launched or self._quitting:
+                return
+            self._quitting = True
             self._window.show_status(Status.Finishing)
-            if not self._engine.finish(timeout=FINISH_TIMEOUT):
-                self._write(f"  finishing timed out after {FINISH_TIMEOUT:g}s; quitting\n")
-        self._engine.stop_listening()
-        self._window.close()
-        self._instance_guard.release()
-        self._launched = False
-        self._quitting = False
-
-    def _log(self, message: str) -> None:
-        if self._debug:
-            write_stderr(f"[openwispr] {message}\n")
-
-    def _handle_action(self, action: Action) -> None:
-        self._log(f"chord action {action.name}")
-        if action is Action.Start:
-            self._next_dictation_id += 1
-            dictation = Dictation(self._next_dictation_id)
-            if self._engine.start_recording(dictation):
-                self._active_dictation = dictation
-                self._window.show_status(Status.Listening)
-        elif action is Action.Stop:
-            self._log("Stop: finishing dictation")
-            if self._active_dictation is not None:
-                self._pending_dictations.add(self._active_dictation)
-                self._active_dictation = None
-            self._window.show_status(Status.Transcribing)
-            self._engine.stop_recording()
-            if not self._engine.is_busy():
-                self._show_settled_status()
-        elif action is Action.Cancel:
-            if self._active_dictation is not None:
-                self._seen_dictations.add(self._active_dictation)
-                self._active_dictation = None
-            self._engine.cancel_recording()
-            self._show_settled_status()
-
-    def _handle_text(self, text: str, dictation: Dictation) -> None:
-        self._log(f"transcription result: {text}")
-        if dictation not in self._pending_dictations or dictation in self._seen_dictations:
-            self._log("transcription ignored: no insertion")
-            return
-        self._pending_dictations.discard(dictation)
-        self._seen_dictations.add(dictation)
-        if not self._quitting:
-            self._show_settled_status()
-        if not text:
-            return
-        self._log(f"insertion call: {text!r}")
+        finished = threading.Event()
+        threading.Thread(target=self._finish_dictation_module, args=(finished,), name="quit-finish", daemon=True).start()
         try:
-            self._inserter.insert(f"{text} ")
-        except Exception as e:
-            self._log(f"insertion failed: {e}")
+            self._window.stay_responsive_until(finished)
+        finally:
+            self._dictation_module.shut_down()
+            self._window.close()
+            self._instance_guard.release()
+            with self._status_lock:
+                self._launched = False
+                self._quitting = False
 
-    def _show_settled_status(self) -> None:
-        if self._active_dictation is not None:
-            self._window.show_status(Status.Listening)
-        elif self._pending_dictations:
-            self._window.show_status(Status.Transcribing)
-        else:
-            self._window.show_status(Status.Idle)
+    def _finish_dictation_module(self, finished: threading.Event) -> None:
+        """Runs off the Tk thread so the window keeps showing Finishing."""
+        try:
+            if not self._dictation_module.finish(timeout=FINISH_TIMEOUT):
+                write_stderr(f"  finishing timed out after {FINISH_TIMEOUT:g}s; quitting\n")
+        finally:
+            finished.set()
 
-    @staticmethod
-    def _write(message: str) -> None:
-        write_stderr(message)
+    def _show_status(self, status: Status) -> None:
+        with self._status_lock:
+            if self._launched and not self._quitting:
+                self._window.show_status(status)

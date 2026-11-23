@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import queue
+import threading
 import tkinter as tk
 from collections.abc import Callable
 
-from openwispr.desktop_app import Status
+from openwispr.status import Status
 from openwispr.wave_indicator import WaveIndicator
+
+STATUS_POLL_MS = 30
+"""How often the running event loop applies statuses queued by other threads."""
+RESPONSIVE_WAIT_SECONDS = 0.03
+"""How long stay_responsive_until waits between event loop passes."""
 
 
 class TkWindow:
@@ -18,6 +25,8 @@ class TkWindow:
         self._root.resizable(False, False)
         self._status = tk.StringVar(value=Status.Idle.label)
         self._quit_handler: Callable[[], None] | None = None
+        self._pending_statuses: queue.SimpleQueue[Status] = queue.SimpleQueue()
+        self._closed = False
         factory = indicator_factory if indicator_factory is not None else WaveIndicator
         self._indicator = factory(self._root)
 
@@ -29,11 +38,27 @@ class TkWindow:
         tk.Button(frame, text="Quit", command=self._quit).pack(anchor="e", pady=(12, 0))
 
         self._root.protocol("WM_DELETE_WINDOW", self._quit)
+        self._root.after(STATUS_POLL_MS, self._apply_pending_statuses)
 
     def set_quit_handler(self, handler: Callable[[], None]) -> None:
         self._quit_handler = handler
 
     def show_status(self, status: Status) -> None:
+        """Safe from any thread: the status is applied later on the Tk thread."""
+        self._pending_statuses.put(status)
+
+    def _apply_pending_statuses(self) -> None:
+        if self._closed:
+            return
+        while True:
+            try:
+                status = self._pending_statuses.get_nowait()
+            except queue.Empty:
+                break
+            self._apply_status(status)
+        self._root.after(STATUS_POLL_MS, self._apply_pending_statuses)
+
+    def _apply_status(self, status: Status) -> None:
         self._status.set(status.label)
         if status is Status.Listening:
             self._indicator.show()
@@ -51,7 +76,18 @@ class TkWindow:
     def run(self) -> None:
         self._root.mainloop()
 
+    def stay_responsive_until(self, done: threading.Event) -> None:
+        """Keeps the Tk event loop running (statuses applied, window redrawn)
+        until done is set. Call on the Tk thread."""
+        while not done.is_set():
+            try:
+                self._root.update()
+            except tk.TclError:
+                return
+            done.wait(RESPONSIVE_WAIT_SECONDS)
+
     def close(self) -> None:
+        self._closed = True
         self._indicator.close()
         try:
             self._root.destroy()
