@@ -78,7 +78,7 @@ def build_desktop_app(
 ) -> DesktopApp:
     return DesktopApp(
         window_factory=lambda: TkWindow(),
-        dictation_factory=lambda: DictationModule(
+        dictation_module_factory=lambda: DictationModule(
             chord_listener=WindowsChordListener(config.chord),
             microphone=_build_microphone(config),
             transcriber=transcriber,

@@ -22,14 +22,14 @@ class DesktopApp:
         self,
         *,
         window_factory: Callable[[], object],
-        dictation_factory: Callable[[], object],
+        dictation_module_factory: Callable[[], object],
         instance_guard: object,
     ) -> None:
         self._window_factory = window_factory
-        self._dictation_factory = dictation_factory
+        self._dictation_module_factory = dictation_module_factory
         self._instance_guard = instance_guard
         self._window: object | None = None
-        self._dictation: object | None = None
+        self._dictation_module: object | None = None
         self._status_lock = threading.Lock()
         self._launched = False
         self._quitting = False
@@ -40,10 +40,10 @@ class DesktopApp:
             return False
         self._launched = True
         self._window = self._window_factory()
-        self._dictation = self._dictation_factory()
+        self._dictation_module = self._dictation_module_factory()
         self._window.set_quit_handler(self.quit)
         self._window.show_status(Status.Idle)
-        self._dictation.start(self._show_status)
+        self._dictation_module.start(self._show_status)
         return True
 
     def _focus_existing_with_retry(self) -> None:
@@ -69,21 +69,21 @@ class DesktopApp:
             self._quitting = True
             self._window.show_status(Status.Finishing)
         finished = threading.Event()
-        threading.Thread(target=self._finish_dictation, args=(finished,), name="quit-finish", daemon=True).start()
+        threading.Thread(target=self._finish_dictation_module, args=(finished,), name="quit-finish", daemon=True).start()
         try:
             self._window.stay_responsive_until(finished)
         finally:
-            self._dictation.stop()
+            self._dictation_module.shut_down()
             self._window.close()
             self._instance_guard.release()
             with self._status_lock:
                 self._launched = False
                 self._quitting = False
 
-    def _finish_dictation(self, finished: threading.Event) -> None:
+    def _finish_dictation_module(self, finished: threading.Event) -> None:
         """Runs off the Tk thread so the window keeps showing Finishing."""
         try:
-            if not self._dictation.finish(timeout=FINISH_TIMEOUT):
+            if not self._dictation_module.finish(timeout=FINISH_TIMEOUT):
                 write_stderr(f"  finishing timed out after {FINISH_TIMEOUT:g}s; quitting\n")
         finally:
             finished.set()

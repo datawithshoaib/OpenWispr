@@ -181,7 +181,7 @@ class Harness:
         self.debug = debug
         self.app = DesktopApp(
             window_factory=self._build_window,
-            dictation_factory=self._build_dictation_module,
+            dictation_module_factory=self._build_dictation_module,
             instance_guard=self.guard,
         )
 
@@ -293,7 +293,7 @@ def test_second_launch_retries_focus_until_existing_window_is_ready(make_app, mo
     assert h.guard.released is False
 
 
-def test_refused_launch_does_not_build_window_or_dictation_engine(make_app):
+def test_refused_launch_does_not_build_window_or_dictation_module(make_app):
     h = make_app(acquired=False)
 
     h.app.launch()

@@ -49,7 +49,7 @@ class DictationModule:
         self._recording = False
         self._finishing = False
         self._pending = 0
-        self._stopping = threading.Event()
+        self._shutting_down = threading.Event()
         self._insert_lock = threading.Lock()
         self._action_thread: threading.Thread | None = None
         self._worker_thread: threading.Thread | None = None
@@ -57,7 +57,7 @@ class DictationModule:
     def start(self, on_status: Callable[[Status], None]) -> None:
         """Starts listening for Chord actions; every status change goes to on_status."""
         self._on_status = on_status
-        self._stopping.clear()
+        self._shutting_down.clear()
         with self._state:
             self._finishing = False
         self._worker_thread = threading.Thread(target=self._transcribe_queued, name="dictation-worker", daemon=True)
@@ -82,7 +82,7 @@ class DictationModule:
                 self._state.wait(remaining)
         return True
 
-    def stop(self) -> None:
+    def shut_down(self) -> None:
         """Stops listening for Chord actions and ends the background threads.
         Nothing is inserted after this returns, even if a transcription that
         finish gave up on completes later.
@@ -91,9 +91,9 @@ class DictationModule:
         transcription and outlive this call. It is a daemon thread and is
         deliberately not killed (Python cannot interrupt it safely); whatever
         it transcribes is discarded because insertion is refused once
-        stopping is set."""
+        shutting down has begun."""
         with self._insert_lock:
-            self._stopping.set()
+            self._shutting_down.set()
         self._chord_listener.stop()
         self._join(self._action_thread)
         self._stop_recording()
@@ -101,12 +101,12 @@ class DictationModule:
         self._join(self._worker_thread)
 
     def _handle_actions(self) -> None:
-        while not self._stopping.is_set():
+        while not self._shutting_down.is_set():
             try:
                 action = self._actions.get(timeout=0.2)
             except Empty:
                 continue
-            if self._stopping.is_set():
+            if self._shutting_down.is_set():
                 return
             self._log(f"chord action {action.name}")
             if action is Action.Start:
@@ -213,8 +213,8 @@ class DictationModule:
             self._log("transcription ignored: no insertion")
             return
         with self._insert_lock:
-            if self._stopping.is_set():
-                self._log("transcription ignored after stop: no insertion")
+            if self._shutting_down.is_set():
+                self._log("transcription ignored after shut down: no insertion")
                 return
             self._log(f"insertion call: {text!r}")
             try:

@@ -42,4 +42,8 @@ _Avoid_: stop, disable, exit
 
 **Stop**:
 Ending the current Dictation without ending the Desktop App.
-_Avoid_: quit, exit, cancel
+_Avoid_: quit, exit
+
+**Cancel**:
+Ending the current Dictation without inserting anything; Escape does this.
+_Avoid_: abort, discard, stop
