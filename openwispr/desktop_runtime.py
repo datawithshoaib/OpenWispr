@@ -7,8 +7,8 @@ import numpy as np
 
 from openwispr import audio, platform_win
 from openwispr.config import DesktopConfig
-from openwispr.desktop_app import DesktopApp
-from openwispr.dictation import DictationModule
+from openwispr.desktop_app import DesktopApp, InstanceGuard
+from openwispr.dictation import DictationModule, Microphone, Transcriber
 from openwispr.hotkey import Action, Chord
 from openwispr.instance import SessionInstanceGuard
 from openwispr.window import TkWindow
@@ -64,7 +64,7 @@ class TextInserter:
             platform_win.paste_text(text)
 
 
-def _build_microphone(config: DesktopConfig) -> object:
+def _build_microphone(config: DesktopConfig) -> Microphone:
     if config.fake_mic:
         return FakeMicSource(Path(config.fake_mic))
     return audio.Recorder(config.device)
@@ -73,12 +73,12 @@ def _build_microphone(config: DesktopConfig) -> object:
 def build_desktop_app(
     *,
     config: DesktopConfig,
-    transcriber: object,
-    instance_guard: object | None = None,
+    transcriber: Transcriber,
+    instance_guard: InstanceGuard | None = None,
 ) -> DesktopApp:
     return DesktopApp(
         window_factory=lambda: TkWindow(),
-        dictation_factory=lambda: DictationModule(
+        dictation_module_factory=lambda: DictationModule(
             chord_listener=WindowsChordListener(config.chord),
             microphone=_build_microphone(config),
             transcriber=transcriber,

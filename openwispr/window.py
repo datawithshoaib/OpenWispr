@@ -9,6 +9,9 @@ from openwispr.status import Status
 from openwispr.wave_indicator import WaveIndicator
 
 STATUS_POLL_MS = 30
+"""How often the running event loop applies statuses queued by other threads."""
+RESPONSIVE_WAIT_SECONDS = 0.03
+"""How long stay_responsive_until waits between event loop passes."""
 
 
 class TkWindow:
@@ -81,7 +84,7 @@ class TkWindow:
                 self._root.update()
             except tk.TclError:
                 return
-            done.wait(STATUS_POLL_MS / 1000)
+            done.wait(RESPONSIVE_WAIT_SECONDS)
 
     def close(self) -> None:
         self._closed = True

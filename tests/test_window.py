@@ -2,7 +2,7 @@ import threading
 import time
 
 import openwispr.window as window_module
-from openwispr.desktop_app import Status
+from openwispr.status import Status
 
 
 class FakeIndicator:
