@@ -68,14 +68,25 @@ class DesktopApp:
                 return
             self._quitting = True
             self._window.show_status(Status.Finishing)
-        if not self._dictation.finish(timeout=FINISH_TIMEOUT):
-            write_stderr(f"  finishing timed out after {FINISH_TIMEOUT:g}s; quitting\n")
-        self._dictation.stop()
-        self._window.close()
-        self._instance_guard.release()
-        with self._status_lock:
-            self._launched = False
-            self._quitting = False
+        finished = threading.Event()
+        threading.Thread(target=self._finish_dictation, args=(finished,), name="quit-finish", daemon=True).start()
+        try:
+            self._window.stay_responsive_until(finished)
+        finally:
+            self._dictation.stop()
+            self._window.close()
+            self._instance_guard.release()
+            with self._status_lock:
+                self._launched = False
+                self._quitting = False
+
+    def _finish_dictation(self, finished: threading.Event) -> None:
+        """Runs off the Tk thread so the window keeps showing Finishing."""
+        try:
+            if not self._dictation.finish(timeout=FINISH_TIMEOUT):
+                write_stderr(f"  finishing timed out after {FINISH_TIMEOUT:g}s; quitting\n")
+        finally:
+            finished.set()
 
     def _show_status(self, status: Status) -> None:
         with self._status_lock:

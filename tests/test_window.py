@@ -1,4 +1,5 @@
 import threading
+import time
 
 import openwispr.window as window_module
 from openwispr.desktop_app import Status
@@ -68,6 +69,9 @@ def make_view(monkeypatch):
             due, self.scheduled = self.scheduled, []
             for func in due:
                 func()
+
+        def update(self):
+            self.run_event_loop()
 
         def title(self, value):
             pass
@@ -180,3 +184,27 @@ def test_closing_stops_applying_statuses(monkeypatch):
 
     assert indicators[0].calls == ["close"]
     assert status_values == [Status.Idle.label]
+
+
+def test_waiting_keeps_the_event_loop_running_so_finishing_shows_and_wave_pill_hides(monkeypatch):
+    view, indicators, _, _, status_values = make_view(monkeypatch)
+    view.show_status(Status.Listening)
+    run_event_loop(view)
+    view.set_threads.clear()
+    done = threading.Event()
+
+    def finish_once_finishing_is_shown():
+        deadline = time.monotonic() + 5
+        while Status.Finishing.label not in status_values and time.monotonic() < deadline:
+            time.sleep(0.005)
+        done.set()
+
+    worker = threading.Thread(target=finish_once_finishing_is_shown)
+    worker.start()
+    view.show_status(Status.Finishing)
+    view.stay_responsive_until(done)
+    worker.join(timeout=1)
+
+    assert status_values[-1] == Status.Finishing.label
+    assert indicators[0].calls == ["show", "hide"]
+    assert view.set_threads == {threading.get_ident()}

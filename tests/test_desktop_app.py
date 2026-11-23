@@ -32,6 +32,8 @@ class FakeWindow:
         self.closed = False
         self.focused = False
         self.quit_handler = None
+        self.while_responsive = lambda: None
+        self.interrupted = False
 
     @property
     def status(self):
@@ -47,7 +49,13 @@ class FakeWindow:
         self.focused = True
 
     def run(self):
-        pass
+        if self.interrupted:
+            raise KeyboardInterrupt
+
+    def stay_responsive_until(self, done):
+        self.events.append(f"responsive showing {self.status.name}")
+        self.while_responsive()
+        done.wait(WAIT_TIMEOUT)
 
     def close(self):
         self.closed = True
@@ -114,11 +122,13 @@ class FakeTranscriber:
 
 
 class FakeInserter:
-    def __init__(self):
+    def __init__(self, events):
         self.inserted = []
+        self.events = events
 
     def insert(self, text):
         self.inserted.append(text)
+        self.events.append(f"insert {text!r}")
 
 
 class FakeSoundCues:
@@ -159,7 +169,7 @@ class Harness:
         self.chord_listener = FakeChordListener(self.events)
         self.microphone = microphone
         self.transcriber = transcriber
-        self.inserter = FakeInserter()
+        self.inserter = FakeInserter(self.events)
         self.cues = FakeSoundCues()
         self.guard = FakeInstanceGuard(acquired, focus_results)
         self.debug = debug
@@ -408,8 +418,38 @@ def test_window_close_finishes_dictation_before_quitting(make_app):
 
     assert h.window.statuses == [Status.Idle, Status.Listening, Status.Finishing]
     assert h.inserted == ["hello world "]
-    assert h.events == ["stop chord listener", "close window"]
+    assert h.events == ["responsive showing Finishing", "insert 'hello world '", "stop chord listener", "close window"]
     assert (h.window.closed, h.guard.released) == (True, True)
+
+
+def test_quit_keeps_window_responsive_showing_finishing_until_slow_dictation_is_inserted(make_app, monkeypatch):
+    monkeypatch.setattr(desktop_app_module, "FINISH_TIMEOUT", 2.0)
+    h = make_app(transcripts=["last words"])
+    h.app.launch()
+    h.start()
+    h.transcriber.hold()
+    h.window.while_responsive = h.transcriber.release
+
+    h.window.quit_handler()
+
+    assert h.events == ["responsive showing Finishing", "insert 'last words '", "stop chord listener", "close window"]
+    assert h.inserted == ["last words "]
+    assert (h.chord_listener.listening, h.window.closed, h.guard.released) == (False, True, True)
+
+
+def test_ctrl_c_quits_the_same_way_as_closing_the_window(make_app, monkeypatch):
+    monkeypatch.setattr(desktop_app_module, "FINISH_TIMEOUT", 2.0)
+    h = make_app(transcripts=["last words"])
+    h.app.launch()
+    h.start()
+    h.transcriber.hold()
+    h.window.while_responsive = h.transcriber.release
+    h.window.interrupted = True
+
+    h.app.run()
+
+    assert h.events == ["responsive showing Finishing", "insert 'last words '", "stop chord listener", "close window"]
+    assert (h.chord_listener.listening, h.window.closed, h.guard.released) == (False, True, True)
 
 
 def test_finish_timeout_logs_and_still_quits(make_app, monkeypatch, capsys):
