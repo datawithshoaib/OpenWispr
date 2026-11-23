@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import queue
 import tkinter as tk
 from collections.abc import Callable
 
 from openwispr.desktop_app import Status
 from openwispr.wave_indicator import WaveIndicator
+
+STATUS_POLL_MS = 30
 
 
 class TkWindow:
@@ -18,6 +21,8 @@ class TkWindow:
         self._root.resizable(False, False)
         self._status = tk.StringVar(value=Status.Idle.label)
         self._quit_handler: Callable[[], None] | None = None
+        self._pending_statuses: queue.SimpleQueue[Status] = queue.SimpleQueue()
+        self._closed = False
         factory = indicator_factory if indicator_factory is not None else WaveIndicator
         self._indicator = factory(self._root)
 
@@ -29,11 +34,27 @@ class TkWindow:
         tk.Button(frame, text="Quit", command=self._quit).pack(anchor="e", pady=(12, 0))
 
         self._root.protocol("WM_DELETE_WINDOW", self._quit)
+        self._root.after(STATUS_POLL_MS, self._apply_pending_statuses)
 
     def set_quit_handler(self, handler: Callable[[], None]) -> None:
         self._quit_handler = handler
 
     def show_status(self, status: Status) -> None:
+        """Safe from any thread: the status is applied later on the Tk thread."""
+        self._pending_statuses.put(status)
+
+    def _apply_pending_statuses(self) -> None:
+        if self._closed:
+            return
+        while True:
+            try:
+                status = self._pending_statuses.get_nowait()
+            except queue.Empty:
+                break
+            self._apply_status(status)
+        self._root.after(STATUS_POLL_MS, self._apply_pending_statuses)
+
+    def _apply_status(self, status: Status) -> None:
         self._status.set(status.label)
         if status is Status.Listening:
             self._indicator.show()
@@ -52,6 +73,7 @@ class TkWindow:
         self._root.mainloop()
 
     def close(self) -> None:
+        self._closed = True
         self._indicator.close()
         try:
             self._root.destroy()
